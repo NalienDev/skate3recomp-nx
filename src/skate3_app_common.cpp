@@ -350,6 +350,9 @@ std::filesystem::path DefaultRoamingUserRoot() {
 }
 
 std::filesystem::path ResolveSkate3UserRoot(const rex::PathConfig& paths) {
+#if defined(__SWITCH__)
+  return "sdmc:/switch/skate3";
+#else
   const auto executable_root = rex::filesystem::GetExecutableFolder();
   if (std::filesystem::exists(executable_root / "portable.txt")) {
     return executable_root;
@@ -361,6 +364,7 @@ std::filesystem::path ResolveSkate3UserRoot(const rex::PathConfig& paths) {
   }
 
   return DefaultRoamingUserRoot();
+#endif
 }
 
 void ConfigureSkate3UserPaths(rex::PathConfig& paths, std::filesystem::path& settings_path,
@@ -438,9 +442,16 @@ void LoadAndNormalizeSimpleSettings(const std::filesystem::path& settings_path,
 }
 
 std::filesystem::path ResolveRuntimeGameDataRoot(const rex::PathConfig& paths) {
-  if (!paths.game_data_root.empty()) {
+  if (!paths.game_data_root.empty() && skate3::IsGameInstalled(paths.game_data_root)) {
     return paths.game_data_root;
   }
+
+#if defined(__SWITCH__)
+  const auto sdmc_game = std::filesystem::path("sdmc:/switch/skate3/game");
+  if (skate3::IsGameInstalled(sdmc_game)) {
+    return sdmc_game;
+  }
+#endif
 
   const auto working_directory_game = std::filesystem::current_path() / "game";
   if (skate3::IsGameInstalled(working_directory_game)) {

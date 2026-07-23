@@ -31,4 +31,19 @@ class Skate3PureApp : public Skate3BaseApp {
   }
 };
 
+#if defined(__SWITCH__)
+#include <switch.h>
+struct SwitchInitHelper {
+  SwitchInitHelper() {
+    romfsInit();
+    socketInitializeDefault();
+  }
+  ~SwitchInitHelper() {
+    socketExit();
+    romfsExit();
+  }
+};
+static SwitchInitHelper g_switch_init;
+#endif
+
 REX_DEFINE_APP(skate3, Skate3PureApp::Create)

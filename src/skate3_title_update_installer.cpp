@@ -33,6 +33,8 @@
 
 #include <rex/ui/window_win.h>
 #elif defined(__APPLE__)
+#elif defined(__SWITCH__)
+// No GTK/native file dialog on Horizon OS.
 #else
 #include <gtk/gtk.h>
 #endif
@@ -584,6 +586,11 @@ std::filesystem::path PickTitleUpdateFile() {
 std::filesystem::path PickTitleUpdateFile() {
   return skate3::PickTitleUpdateFileMacOS();
 }
+#elif defined(__SWITCH__)
+std::filesystem::path PickTitleUpdateFile() {
+  // No native file-picker on Switch; title updates are staged on the SD card.
+  return {};
+}
 #else
 std::filesystem::path PickTitleUpdateFile() {
   GtkWidget* dialog = gtk_file_chooser_dialog_new(
@@ -857,7 +864,7 @@ bool RunTitleUpdateInstallWizardBlocking(rex::ui::WindowedAppContext& app_contex
     if (window) {
       window->RequestPaint();
     }
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(__SWITCH__)
     while (gtk_events_pending()) {
       gtk_main_iteration_do(FALSE);
     }

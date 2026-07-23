@@ -27,6 +27,8 @@
 
 #include <rex/ui/window_win.h>
 #elif defined(__APPLE__)
+#elif defined(__SWITCH__)
+// No GTK/native file dialog on Horizon OS.
 #else
 #include <gtk/gtk.h>
 #endif
@@ -103,6 +105,12 @@ std::filesystem::path PickIsoFile() {
 #elif defined(__APPLE__)
 std::filesystem::path PickIsoFile() {
   return skate3::PickIsoFileMacOS();
+}
+#elif defined(__SWITCH__)
+std::filesystem::path PickIsoFile() {
+  // No native file-picker on Switch; the game dump is installed to the SD card
+  // (sdmc:/switch/skate3/game) out of band, so ISO installation is unused here.
+  return {};
 }
 #else
 std::filesystem::path PickIsoFile() {
@@ -481,7 +489,7 @@ bool RunRexglueIsoInstallWizardBlocking(rex::ui::WindowedAppContext& app_context
     if (window) {
       window->RequestPaint();
     }
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(__SWITCH__)
     while (gtk_events_pending()) {
       gtk_main_iteration_do(FALSE);
     }

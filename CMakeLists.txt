@@ -38,7 +38,9 @@ if(APPLE AND CMAKE_OSX_ARCHITECTURES)
     endif()
 endif()
 
-if(WIN32)
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR SWITCH)
+    set(SKATE3_BUILD_PLATFORM "switch-arm64")
+elseif(WIN32)
     if(SKATE3_TARGET_PROCESSOR MATCHES "AMD64|x86_64")
         set(SKATE3_BUILD_PLATFORM "win-amd64")
     elseif(SKATE3_TARGET_PROCESSOR MATCHES "aarch64|ARM64")
@@ -326,3 +328,22 @@ if(MSVC)
 else()
     target_compile_options(skate3 PRIVATE -finput-charset=UTF-8 -fexec-charset=UTF-8)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR SWITCH)
+    find_program(ELF2NRO elf2nro HINTS "${DEVKITPRO}/tools/bin" "${DEVKITPRO}/tools")
+    if(ELF2NRO)
+        add_custom_target(skate3_nro ALL
+            COMMAND ${ELF2NRO} $<TARGET_FILE:skate3> $<TARGET_FILE_DIR:skate3>/skate3.nro
+                --icon=${CMAKE_CURRENT_SOURCE_DIR}/banner-light.png
+                --name="Skate 3 Recomp"
+                --author="ReXGlue Team"
+                --version="${SKATE3_NUMERIC_VERSION}"
+            DEPENDS skate3
+            COMMENT "Building Nintendo Switch Homebrew NRO (skate3.nro)"
+            VERBATIM
+        )
+    else()
+        message(WARNING "elf2nro not found; skate3.nro will not be built automatically")
+    endif()
+endif()
+

@@ -22,6 +22,12 @@ REXCVAR_DEFINE_BOOL(skate3_demo_path, false, "Skate 3",
 REXCVAR_DEFINE_BOOL(skate3_demo_path_probe, false, "Skate 3",
                     "Log Skate 3 boot/frontend states used by the demo path");
 
+// The automation below hooks recompiled functions by their exact addresses
+// (sub_82D0AFA0 and friends), which only exist in the Title Update codegen
+// output. A base-game build produces a different function set, so compile the
+// no-op stubs at the bottom of this file instead.
+#if SKATE3_HAS_TITLE_UPDATE
+
 namespace skate3::demo_path {
 namespace {
 
@@ -210,3 +216,15 @@ bool ShouldForceIntroMovieComplete() {
 }
 
 }  // namespace skate3::demo_path
+
+#else  // SKATE3_HAS_TITLE_UPDATE
+
+namespace skate3::demo_path {
+
+void InstallHooks(rex::runtime::FunctionDispatcher* /*dispatcher*/) {}
+
+bool ShouldForceIntroMovieComplete() { return false; }
+
+}  // namespace skate3::demo_path
+
+#endif  // SKATE3_HAS_TITLE_UPDATE

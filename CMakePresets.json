@@ -103,6 +103,32 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "switch-base",
+      "hidden": true,
+      "inherits": "base",
+      "toolchainFile": "${sourceDir}/cmake/Switch.cmake",
+      "cacheVariables": {
+        "REXGLUE_USE_VULKAN": "ON",
+        "REXGLUE_USE_D3D12": "OFF"
+      }
+    },
+    {
+      "name": "switch-release",
+      "displayName": "Switch Release",
+      "inherits": "switch-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "switch-relwithdebinfo",
+      "displayName": "Switch RelWithDebInfo",
+      "inherits": "switch-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
     }
   ],
   "buildPresets": [
@@ -133,6 +159,14 @@
     {
       "name": "macos-release",
       "configurePreset": "macos-release"
+    },
+    {
+      "name": "switch-release",
+      "configurePreset": "switch-release"
+    },
+    {
+      "name": "switch-relwithdebinfo",
+      "configurePreset": "switch-relwithdebinfo"
     }
   ]
 }
