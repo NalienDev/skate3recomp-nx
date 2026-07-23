@@ -330,6 +330,41 @@ else()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR SWITCH)
+    # ------------------------------------------------------------------
+    # Mesa NVK Vulkan driver (statically linked ICD).
+    # The Switch has no Vulkan loader; a prebuilt NVK libvulkan.a supplies the
+    # driver. It is a large, separately-built artifact and is NOT shipped here
+    # (same as the reference Marathon/Unleashed-NX ports) — supply your own:
+    #   -DSKATE3_NVK_LIBRARY=/path/to/builddir-switch/src/nouveau/vulkan/libvulkan.a
+    # (optionally -DSKATE3_NVK_ROOT=/path/to/mesa-nvk for its headers).
+    # Without it the app still builds; Vulkan just fails to initialize at
+    # runtime (weak ICD stubs stand in — see vulkan_icd_stub_switch.cpp).
+    # ------------------------------------------------------------------
+    set(SKATE3_NVK_ROOT "" CACHE PATH "Mesa/NVK Switch build or install root (for headers)")
+    set(SKATE3_NVK_LIBRARY "" CACHE FILEPATH "Mesa/NVK Switch Vulkan static archive (libvulkan.a)")
+    set(SKATE3_NVK_EXTRA_LIBS "drm_nouveau;zstd;z;nx"
+        CACHE STRING "Extra link libraries required by the NVK libvulkan.a")
+
+    if(SKATE3_NVK_LIBRARY AND EXISTS "${SKATE3_NVK_LIBRARY}")
+        message(STATUS "Skate 3: linking NVK Vulkan driver: ${SKATE3_NVK_LIBRARY}")
+        if(SKATE3_NVK_ROOT)
+            target_include_directories(skate3 PRIVATE "${SKATE3_NVK_ROOT}/include")
+        endif()
+        # Force-keep the ICD entry points so they override the weak stubs and are
+        # not dropped by --gc-sections, then link the driver and its deps.
+        target_link_options(skate3 PRIVATE
+            "-Wl,-u,vk_icdGetInstanceProcAddr"
+            "-Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion")
+        target_link_libraries(skate3 PRIVATE
+            "${SKATE3_NVK_LIBRARY}"
+            ${SKATE3_NVK_EXTRA_LIBS})
+    else()
+        message(WARNING
+            "SKATE3_NVK_LIBRARY not set or missing; skate3.nro will build but "
+            "Vulkan will be unavailable at runtime. Build Mesa NVK for Switch "
+            "and pass -DSKATE3_NVK_LIBRARY=/path/to/libvulkan.a to enable it.")
+    endif()
+
     find_program(ELF2NRO elf2nro HINTS "${DEVKITPRO}/tools/bin" "${DEVKITPRO}/tools")
     if(ELF2NRO)
         add_custom_target(skate3_nro ALL
