@@ -3,6 +3,11 @@
 #include "skate3_demo_path.h"
 #include "skate3_fov.h"
 #include "skate3_iso_installer.h"
+#include "skate3_native_render.h"
+#include "skate3_native_scene.h"
+#include "skate3_screenshot.h"
+#include "skate3_shader_disasm.h"
+#include "skate3_win_icon.h"
 #include "skate3_title_update_installer.h"
 #include "skate3_user_settings.h"
 
@@ -44,7 +49,7 @@
 #include <rex/filesystem/devices/host_path_device.h>
 #include <rex/filesystem/vfs.h>
 #include <rex/graphics/flags.h>
-#include <rex/graphics/ultrawide_debug.h>
+#include <rex/graphics/native_guest_renderer.h>
 #include <rex/input/input_system.h>
 #include <rex/kernel/xam/module.h>
 #include <rex/logging.h>
@@ -59,8 +64,8 @@
 #include <rex/system.h>
 #include <rex/ui/flags.h>
 #include <rex/ui/keybinds.h>
+#include <rex/ui/window.h>
 #include <rex/ui/overlay/simple_settings_overlay.h>
-#include <rex/ui/overlay/ultrawide_targets_overlay.h>
 
 #include <imgui.h>
 #include <toml++/toml.hpp>
@@ -75,49 +80,30 @@ extern const rex::PPCImageInfo eawebkit_PPCImageConfig;
 // lift via config because they overlap with auto-discovered parent functions.
 extern "C" REX_FUNC(__restgprlr_19);
 
+// Defined in skate3_native_scene.cpp; toggled by the showcase hotkey below.
+REXCVAR_DECLARE(bool, skate3_native_render_capture_hotkeys);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_showcase);
+// Defined in skate3_native_scene.cpp; the freecam hotkey below toggles it,
+// and while it captures input the guest input system is gated off.
+REXCVAR_DECLARE(bool, skate3_native_render_scene_freecam);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_freecam_capture_input);
+
 REXCVAR_DEFINE_STRING(skate3_dlc_root, "", "Skate 3",
                       "Directory containing Skate 3 DLC package files");
 REXCVAR_DEFINE_BOOL(skate3_auto_install_dlc, true, "Skate 3",
                     "Install DLC package files found in configured DLC folders");
 REXCVAR_DEFINE_BOOL(skate3_ultrawide, false, "Skate 3",
-                    "Automatically derive an ultrawide guest video mode from the host display");
+                    "Ultrawide display support: the native renderer draws true widescreen "
+                    "frames at the host display aspect (requires the native renderer; the "
+                    "emulated fallback presents 16:9 pillarboxed)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_DOUBLE(skate3_field_of_view, 60.0, "Skate 3",
                       "Gameplay camera field of view in degrees")
     .range(40.0, 120.0);
-REXCVAR_DEFINE_INT32(skate3_ultrawide_base_height, 720, "Skate 3",
-                     "Guest video mode height used when deriving ultrawide modes")
-    .range(480, 2160)
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(skate3_ultrawide_hor_plus, true, "Skate 3",
-                    "Apply Hor+ clip-space correction for ultrawide video modes");
-REXCVAR_DEFINE_DOUBLE(skate3_ultrawide_hor_plus_scale, 0.0, "Skate 3",
-                      "Manual Hor+ X scale override (0 = derive from host aspect)")
-    .range(0.0, 4.0)
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(skate3_ultrawide_disable_ndc_correction, false, "Skate 3",
-                    "Diagnostic: disable the GPU NDC Hor+ correction while preserving guest-side "
-                    "ultrawide diagnostics");
-REXCVAR_DEFINE_BOOL(skate3_ultrawide_trace_draws, false, "Skate 3",
-                    "Diagnostic: collect live draw fingerprints for the F7 ultrawide overlay");
-REXCVAR_DEFINE_BOOL(skate3_ultrawide_object_stage_trace_to_disk, false, "Skate 3",
-                    "Diagnostic: write object render-stage transition summaries to disk");
-REXCVAR_DEFINE_BOOL(skate3_ultrawide_object_stage_trace_continuous, false, "Skate 3",
-                    "Diagnostic: continuously trace object render-stage summaries");
-REXCVAR_DEFINE_INT32(skate3_ultrawide_object_stage_trace_frames_remaining, 0, "Skate 3",
-                     "Diagnostic: trace this many object render-stage frames")
-    .range(0, 1000000);
-REXCVAR_DEFINE_INT32(skate3_ultrawide_object_stage_marker, 0, "Skate 3",
-                     "Diagnostic: mark the next object-stage frame (1 visible, 2 invisible)")
-    .range(0, 2);
-REXCVAR_DEFINE_INT32(skate3_ultrawide_object_stage_missing_limit, 256, "Skate 3",
-                     "Diagnostic: maximum missing-main objects to log per object-stage frame")
-    .range(0, 4096);
-REXCVAR_DEFINE_BOOL(skate3_ultrawide_force_main_visibility_flags, false, "Skate 3",
-                    "Force main render object visibility flags while Hor+ ultrawide is active");
 REXCVAR_DEFINE_BOOL(skate3_ultrawide_widen_game_frustum, true, "Skate 3",
                     "Widen the game-side main-world cull frustum to match the ultrawide view");
 REXCVAR_DEFINE_DOUBLE(skate3_ultrawide_target_aspect, 0.0, "Skate 3",
-                      "Derived host display aspect for ultrawide presentation (0 = disabled)")
+                      "Ultrawide display aspect (0 = derive from the host display at boot)")
     .range(0.0, 8.0);
 
 namespace {
@@ -125,6 +111,11 @@ namespace {
 void ApplyDemoPathProfileOverride() {
   if (!rex::cvar::Query<bool>("skate3_demo_path") &&
       !rex::cvar::Query<bool>("skate3_demo_path_probe")) {
+    return;
+  }
+  if (rex::cvar::Query<bool>("skate3_demo_path_signed_in")) {
+    // Closer-to-real-use runs: keep the user's profile and save so the boot
+    // flow resumes their career instead of a signed-out session.
     return;
   }
 
@@ -195,6 +186,7 @@ void SetRestartArgument(std::vector<std::string>& args, std::string name, std::s
 constexpr std::string_view kUserDirectoryName = "skate3";
 constexpr std::string_view kSettingsFilename = "settings.toml";
 constexpr std::string_view kDlcDirectoryName = "dlc";
+constexpr std::string_view kSavesDirectoryName = "saves";
 constexpr double kSixteenNineAspect = 16.0 / 9.0;
 constexpr double kUltrawideAspectEpsilon = 0.01;
 
@@ -271,40 +263,42 @@ std::optional<DisplaySize> ResolveUltrawideTargetDisplaySize() {
 }
 
 void ApplyUltrawideVideoDefaults() {
-  if (!REXCVAR_GET(skate3_ultrawide) ||
-      rex::cvar::HasNonDefaultValue("skate3_ultrawide_target_aspect")) {
+  if (!REXCVAR_GET(skate3_ultrawide)) {
     return;
   }
 
-  const std::optional<DisplaySize> target_size = ResolveUltrawideTargetDisplaySize();
-  if (!target_size || target_size->width <= 0 || target_size->height <= 0) {
-    return;
-  }
-
-  const double target_aspect =
-      static_cast<double>(target_size->width) / static_cast<double>(target_size->height);
+  // Explicitly configured aspect wins; otherwise derive it from the
+  // fullscreen monitor (or a configured window size) once at boot.
+  double target_aspect = rex::cvar::HasNonDefaultValue("skate3_ultrawide_target_aspect")
+                             ? REXCVAR_GET(skate3_ultrawide_target_aspect)
+                             : 0.0;
   if (target_aspect <= kSixteenNineAspect + kUltrawideAspectEpsilon) {
-    return;
+    const std::optional<DisplaySize> target_size = ResolveUltrawideTargetDisplaySize();
+    if (!target_size || target_size->width <= 0 || target_size->height <= 0) {
+      return;
+    }
+    target_aspect =
+        static_cast<double>(target_size->width) / static_cast<double>(target_size->height);
+    if (target_aspect <= kSixteenNineAspect + kUltrawideAspectEpsilon) {
+      return;
+    }
+    rex::cvar::SetFlagByName("skate3_ultrawide_target_aspect", std::to_string(target_aspect));
   }
 
-  rex::cvar::SetFlagByName("skate3_ultrawide_target_aspect", std::to_string(target_aspect));
+  // The native renderer draws true wide frames at this aspect (wide guest
+  // output + Hor+ projection + centered 2D band). Emulated fallback frames
+  // keep the 16:9 guest output and present pillarboxed via the letterbox
+  // default below.
+  rex::graphics::SetNativeGuestOutputWideAspect(
+      std::clamp(target_aspect, kSixteenNineAspect, 8.0));
 
   if (!rex::cvar::HasNonDefaultValue("present_letterbox")) {
     rex::cvar::SetFlagByName("present_letterbox", "true");
   }
 }
 
-void DisableActiveUltrawideDiagnostics() {
+void DisableActiveDebugDiagnostics() {
   constexpr std::string_view kFalseFlags[] = {
-      "skate3_ultrawide_trace_draws",
-      "skate3_ultrawide_object_stage_trace_to_disk",
-      "skate3_ultrawide_object_stage_trace_continuous",
-      "skate3_ultrawide_force_main_visibility_flags",
-      "skate3_ultrawide_texture_trace_bind_keys",
-      "skate3_ultrawide_texture_trace_scaled_resolve",
-      "skate3_ultrawide_ignore_streamer_texture_invalidations",
-      "skate3_ultrawide_screen_callback_tracking",
-      "skate3_ultrawide_fake_occlusion_queries",
       "perf_draw_fingerprints",
       "perf_keep_heavyweight_draw_diagnostics",
       "trace_gpu_stream",
@@ -314,9 +308,6 @@ void DisableActiveUltrawideDiagnostics() {
   }
 
   constexpr std::string_view kZeroFlags[] = {
-      "skate3_ultrawide_texture_trace_remaining",
-      "skate3_ultrawide_object_stage_trace_frames_remaining",
-      "skate3_ultrawide_object_stage_marker",
       "vulkan_debug_log_frame_summaries_remaining",
       "vulkan_debug_log_resolve_decisions_remaining",
       "vulkan_debug_log_team_profile_background_candidates_remaining",
@@ -327,8 +318,6 @@ void DisableActiveUltrawideDiagnostics() {
   for (std::string_view flag : kZeroFlags) {
     rex::cvar::SetFlagByName(std::string(flag), "0");
   }
-
-  rex::cvar::SetFlagByName("skate3_ultrawide_fake_occlusion_sample_count", "1000");
 }
 
 std::filesystem::path DefaultDocumentsUserRoot() {
@@ -351,9 +340,11 @@ std::filesystem::path DefaultRoamingUserRoot() {
 
 std::filesystem::path ResolveSkate3UserRoot(const rex::PathConfig& paths) {
 #if defined(__SWITCH__)
+  // Horizon has no documents/roaming folders and no portable.txt convention;
+  // homebrew keeps its data next to the app on the SD card.
   return "sdmc:/switch/skate3";
 #else
-  const auto executable_root = rex::filesystem::GetExecutableFolder();
+  const auto executable_root = rex::filesystem::GetAppRootFolder();
   if (std::filesystem::exists(executable_root / "portable.txt")) {
     return executable_root;
   }
@@ -409,11 +400,7 @@ bool DeveloperConfigHasResolutionScaleOverride(const std::filesystem::path& conf
                                                 "draw_resolution_scale_y"});
 }
 
-#if REX_PLATFORM_MAC
-constexpr int kDefaultResolutionScale = 1;
-#else
 constexpr int kDefaultResolutionScale = 2;
-#endif
 
 void ApplyFirstRunVideoDefaults(const std::filesystem::path& settings_path,
                                 const std::filesystem::path& developer_config_path) {
@@ -550,11 +537,7 @@ void Skate3BaseApp::OnConfigurePaths(rex::PathConfig& paths) {
   LoadAndNormalizeSimpleSettings(user_settings_path_, config_path_);
   Skate3InitializeFieldOfViewOverride();
   ApplyUltrawideVideoDefaults();
-  if (!rex::graphics::ultrawide_debug::LoadTargets(paths.cache_root /
-                                                   "skate3_ultrawide_targets.toml")) {
-    rex::graphics::ultrawide_debug::LoadBuiltInSkate3Classifier();
-  }
-  DisableActiveUltrawideDiagnostics();
+  DisableActiveDebugDiagnostics();
 }
 
 void Skate3BaseApp::OnConfigureFonts(ImFontAtlas* atlas) {
@@ -694,20 +677,48 @@ std::optional<rex::PathConfig> Skate3BaseApp::OnFinalizePaths(
     runtime_paths = std::move(tu_paths);
   }
 #endif
+#if defined(_WIN32)
+  // Window/taskbar + Explorer icon sourced from the user's OWN game art at
+  // runtime (game/nxeart); the shipped exe and the repo carry no EA
+  // artwork (see skate3_win_icon.h). Game files are guaranteed installed by
+  // this point on Windows (the install wizards above run blocking).
+  skate3::ApplyGameIconFromGameData(
+      runtime_paths.game_data_root,
+      window() ? window()->GetNativeWindowHandle() : nullptr);
+#endif
   return runtime_paths;
 }
 
 void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
-  (void)drawer;
+  // Native/emulated corner readout (top right; off by default, cvar
+  // skate3_native_render_mode_indicator shows it live). Input-transparent,
+  // so it never affects cursor or focus handling.
+  render_mode_indicator_ = std::make_unique<skate3::RenderModeIndicator>(drawer);
   rex::ui::RegisterBind("bind_skate3_menu", "Escape", "Skate 3 settings", [this] {
-    ToggleSimpleSettings();
+    // Escape backs out of the settings screen level by level (rows ->
+    // category rail -> closed); when the screen is closed it opens it.
+    if (simple_settings_dialog_ && simple_settings_dialog_->visible()) {
+      simple_settings_dialog_->NavigateBack();
+    } else {
+      ToggleSimpleSettings();
+    }
   });
   rex::ui::RegisterBind("bind_skate3_menu_alt", "F1", "Skate 3 settings alternate", [this] {
     ToggleSimpleSettings();
   });
-  rex::ui::RegisterBind("bind_skate3_ultrawide_targets", "F7",
-                        "Skate 3 ultrawide targets", [this] {
-                          ToggleUltrawideTargets();
+  // Remembered handle: the F11 paired A/B parity capture (native + emulated
+  // screenshots + gsnap, sequenced from the guest frame loop in
+  // skate3_native_render.cpp) needs the window without an app pointer.
+  skate3::screenshot::RememberWindow(window() ? window()->GetNativeWindowHandle()
+                                              : nullptr);
+  rex::ui::RegisterBind("bind_skate3_screenshot", "F6",
+                        "Save screenshot to screenshots/", [this] {
+                          skate3::screenshot::CaptureWindow(
+                              window() ? window()->GetNativeWindowHandle() : nullptr);
+                        });
+  rex::ui::RegisterBind("bind_skate3_native_render_toggle", "F5",
+                        "Toggle native/emulated renderer", [] {
+                          skate3::native_scene::ToggleSceneEnabled();
                         });
   rex::ui::RegisterBind("bind_skate3_save_draw_fingerprints", "F8",
                         "Save draw fingerprint log", [this] {
@@ -721,9 +732,33 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
                         "Write marker to log", [this] {
                           LogUserMarker();
                         });
+  rex::ui::RegisterBind("bind_skate3_native_debug", "F12",
+                        "Native render debug menu", [this] {
+                          ToggleNativeDebug();
+                        });
+  rex::ui::RegisterBind("bind_skate3_showcase", "Ctrl+Shift+B",
+                        "Graphics build-up showcase", [] {
+                          // A capture/recording tool, not a player feature:
+                          // like the capture hotkeys, the bind is inert
+                          // unless the diagnostics cvar opts in (the F12
+                          // Showcase Setup window still starts runs).
+                          if (!REXCVAR_GET(skate3_native_render_capture_hotkeys)) {
+                            return;
+                          }
+                          REXCVAR_SET(
+                              skate3_native_render_scene_showcase,
+                              !REXCVAR_GET(skate3_native_render_scene_showcase));
+                        });
+  rex::ui::RegisterBind("bind_skate3_freecam", "End",
+                        "Drone camera (free fly)", [] {
+                          REXCVAR_SET(
+                              skate3_native_render_scene_freecam,
+                              !REXCVAR_GET(skate3_native_render_scene_freecam));
+                        });
 }
 
 void Skate3BaseApp::OnPostSetup() {
+  skate3::shader_disasm::RunIfRequested();
   ApplySelectedProfileToRuntime();
   ApplyGameplayCursorMode();
 
@@ -731,7 +766,12 @@ void Skate3BaseApp::OnPostSetup() {
     input_system->SetActiveCallback([this]() {
       const bool settings_visible = simple_settings_dialog_ && simple_settings_dialog_->visible();
       const bool xam_ui_active = rex::kernel::xam::xeXamIsUIActive();
-      return !settings_visible && !xam_ui_active;
+      // The drone cam owns the keyboard while flying: keep guest input off
+      // so the fly keys don't also steer the skater.
+      const bool freecam_captures =
+          REXCVAR_GET(skate3_native_render_scene_freecam) &&
+          REXCVAR_GET(skate3_native_render_scene_freecam_capture_input);
+      return !settings_visible && !xam_ui_active && !freecam_captures;
     });
     input_system->SetMenuChordCallback([this]() {
       app_context().CallInUIThreadDeferred([this]() { ToggleSimpleSettings(); });
@@ -740,6 +780,20 @@ void Skate3BaseApp::OnPostSetup() {
 
   if (std::getenv("SKATE3_DISABLE_BIG_ALIASES") == nullptr) {
     InstallBigDeviceAliases();
+  }
+  // Portable saves: a "saves" folder next to the executable takes over
+  // saved-game content when it exists (launcher-managed installs). Layout is
+  // flattened to saves/<xuid>/<save>; nothing is migrated from the user
+  // content tree, and without the folder the default location is unchanged.
+  {
+    const auto portable_saves =
+        rex::filesystem::GetAppRootFolder() / std::string(kSavesDirectoryName);
+    if (std::filesystem::is_directory(portable_saves) && runtime()->kernel_state() &&
+        runtime()->kernel_state()->content_manager()) {
+      runtime()->kernel_state()->content_manager()->SetContentTypeRoot(
+          rex::system::XContentType::kSavedGame, portable_saves);
+      REXLOG_INFO("Skate 3 saves: using portable folder {}", portable_saves.string());
+    }
   }
   InstallDlcPackages();
   InstallRecipeOverlay();
@@ -750,7 +804,13 @@ void Skate3BaseApp::OnPostSetup() {
 #endif
 
   auto* dispatcher = runtime()->function_dispatcher();
+  skate3::native_render::Install();
   skate3::demo_path::InstallHooks(dispatcher);
+  // User-facing intro-movie skip (independent of the demo path): the movie
+  // completion override polls the merged UI pad state through this provider.
+  skate3::demo_path::SetUiInputProvider([this]() {
+    return static_cast<rex::input::InputSystem*>(runtime()->input_system());
+  });
   if (dispatcher->InitializeFunctionTable(eawebkit_PPCImageConfig.code_base,
                                           eawebkit_PPCImageConfig.code_size,
                                           eawebkit_PPCImageConfig.image_base,
@@ -769,13 +829,15 @@ void Skate3BaseApp::OnPostSetup() {
 void Skate3BaseApp::OnShutdown() {
   rex::ui::UnregisterBind("bind_skate3_menu");
   rex::ui::UnregisterBind("bind_skate3_menu_alt");
-  rex::ui::UnregisterBind("bind_skate3_ultrawide_targets");
   rex::ui::UnregisterBind("bind_skate3_save_draw_fingerprints");
   rex::ui::UnregisterBind("bind_skate3_log_debug_marker");
   rex::ui::UnregisterBind("bind_skate3_log_user_marker");
+  rex::ui::UnregisterBind("bind_skate3_native_debug");
   ApplyGameplayCursorMode();
+  skate3::native_scene::SetSettingsMenuBlur(false);
   simple_settings_dialog_.reset();
-  ultrawide_targets_dialog_.reset();
+  native_debug_dialog_.reset();
+  render_mode_indicator_.reset();
 }
 
 void Skate3BaseApp::ToggleSimpleSettings() {
@@ -784,6 +846,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
       simple_settings_dialog_->Hide();
     } else {
       ApplySettingsCursorMode();
+      skate3::native_scene::SetSettingsMenuBlur(true);
       simple_settings_dialog_->Show();
     }
     return;
@@ -824,7 +887,12 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     ApplyDemoPathProfileOverride();
     ApplySelectedProfileToRuntime();
   };
-  auto close_settings = [this]() { ApplyGameplayCursorMode(); };
+  // Fires on every Hide (B/Esc, Close Settings, Close Game), the one spot
+  // that reliably sees the menu close regardless of who initiated it.
+  auto close_settings = [this]() {
+    skate3::native_scene::SetSettingsMenuBlur(false);
+    ApplyGameplayCursorMode();
+  };
   auto close_game = [this]() {
 #if REX_PLATFORM_MAC || REX_PLATFORM_LINUX
     std::thread([]() {
@@ -846,30 +914,47 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     });
   };
   auto restart_game = [this]() { RestartGame(); };
+  // Raw pad poll for menu navigation: bypasses the is_active gate that
+  // zeroes guest-facing input while the settings screen is open.
+  auto poll_gamepad = [this]() {
+    rex::ui::SimpleSettingsGamepad pad;
+    // The dialog can be painted (and thus poll) during a frame that races
+    // runtime teardown at close time, when runtime() is already gone.
+    auto* rt = runtime();
+    auto* input_system =
+        rt ? static_cast<rex::input::InputSystem*>(rt->input_system()) : nullptr;
+    if (input_system) {
+      rex::input::X_INPUT_GAMEPAD state;
+      if (input_system->GetUiGamepadState(&state)) {
+        pad.connected = true;
+        pad.buttons = state.buttons;
+        pad.thumb_lx = state.thumb_lx;
+        pad.thumb_ly = state.thumb_ly;
+      }
+    }
+    return pad;
+  };
   simple_settings_dialog_ =
       std::make_unique<rex::ui::SimpleSettingsDialog>(
           imgui_drawer(), user_settings_path_, std::move(load_profiles), std::move(save_profile),
-          std::move(close_settings), std::move(close_game), std::move(restart_game));
+          std::move(close_settings), std::move(close_game), std::move(restart_game),
+          std::move(poll_gamepad));
   ApplySettingsCursorMode();
+  skate3::native_scene::SetSettingsMenuBlur(true);
   simple_settings_dialog_->Show();
 }
 
-void Skate3BaseApp::ToggleUltrawideTargets() {
-  if (ultrawide_targets_dialog_) {
-    if (ultrawide_targets_dialog_->visible()) {
-      ultrawide_targets_dialog_->Hide();
-    } else {
-      ApplySettingsCursorMode();
-      ultrawide_targets_dialog_->Show();
-    }
-    return;
+void Skate3BaseApp::ToggleNativeDebug() {
+  if (!native_debug_dialog_) {
+    native_debug_dialog_ = std::make_unique<skate3::NativeDebugDialog>(imgui_drawer());
   }
-
-  const auto export_path = cache_root() / "skate3_ultrawide_targets.toml";
-  ultrawide_targets_dialog_ = std::make_unique<rex::ui::UltrawideTargetsDialog>(
-      imgui_drawer(), export_path, [this]() { ApplyGameplayCursorMode(); });
-  ApplySettingsCursorMode();
-  ultrawide_targets_dialog_->Show();
+  if (native_debug_dialog_->visible()) {
+    native_debug_dialog_->Hide();
+    ApplyGameplayCursorMode();
+  } else {
+    ApplySettingsCursorMode();
+    native_debug_dialog_->Show();
+  }
 }
 
 void Skate3BaseApp::ApplySettingsCursorMode() {
@@ -998,7 +1083,7 @@ void Skate3BaseApp::LogUserMarker() {
 
 void Skate3BaseApp::LogDebugMarker() {
   const uint32_t marker = debug_marker_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-  DisableActiveUltrawideDiagnostics();
+  DisableActiveDebugDiagnostics();
   REXLOG_WARN("USER DEBUG MARKER #{}: F9 pressed; active diagnostics disabled", marker);
 }
 
@@ -1195,7 +1280,7 @@ void Skate3BaseApp::InstallDlcPackages() {
   }
 
   const auto source_dirs =
-      DiscoverDlcSourceDirectories(rex::filesystem::GetExecutableFolder(),
+      DiscoverDlcSourceDirectories(rex::filesystem::GetAppRootFolder(),
                                    runtime()->game_data_root(), runtime()->user_data_root());
   std::unordered_set<std::string> seen_packages;
   size_t installed_count = 0;

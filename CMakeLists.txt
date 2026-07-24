@@ -227,10 +227,24 @@ set(SKATE3_COMMON_SOURCES
     src/exception_compat.cpp
     src/skate3_app_common.cpp
     src/skate3_demo_path.cpp
+    src/skate3_draw_distance.cpp
     src/skate3_fov.cpp
     src/skate3_iso_installer.cpp
+    src/native/skate3_native_diagnostics.cpp
+    src/native/skate3_native_entity.cpp
+    src/native/skate3_native_guest_read.cpp
+    src/native/skate3_native_lw.cpp
+    src/native/skate3_native_palette.cpp
+    src/skate3_native_debug_dialog.cpp
+    src/skate3_native_render.cpp
+    src/skate3_native_scene.cpp
+    src/skate3_native_scene_gpu.cpp
+    src/skate3_native_scene_post.cpp
+    src/skate3_screenshot.cpp
+    src/skate3_shader_disasm.cpp
     src/skate3_title_update_installer.cpp
     src/skate3_user_settings.cpp
+    src/skate3_win_icon.cpp
     third_party/rexglue-sdk/thirdparty/crypto/sha256.cpp
 )
 if(APPLE)
@@ -258,7 +272,40 @@ target_include_directories(skate3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}/include
+    ${REXSDK_DIR}/thirdparty/xxHash
 )
+
+set(SKATE3_NATIVE_SHADER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/scene.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/shadow_blur.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/resolve.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/blur.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/outline.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/overlay2d.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/spline.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/photo_fx.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/ssao.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/hdr.hlsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/ssr.hlsl
+)
+# Shared .hlsli headers, inlined into the embedded sources by
+# EmbedShaders.cmake: the embed must rerun when any of them changes.
+file(GLOB SKATE3_NATIVE_SHADER_INCLUDES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/*.hlsli)
+set(SKATE3_NATIVE_SHADER_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/include/skate3_native_shaders.h)
+add_custom_command(
+    OUTPUT ${SKATE3_NATIVE_SHADER_HEADER}
+    COMMAND ${CMAKE_COMMAND}
+        -DSHADER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders
+        -DOUT=${SKATE3_NATIVE_SHADER_HEADER}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaders.cmake
+    DEPENDS ${SKATE3_NATIVE_SHADER_SOURCES}
+        ${SKATE3_NATIVE_SHADER_INCLUDES}
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaders.cmake
+    COMMENT "Embedding native renderer shaders"
+    VERBATIM)
+target_sources(skate3 PRIVATE ${SKATE3_NATIVE_SHADER_HEADER})
 target_compile_definitions(skate3 PRIVATE SKATE3_BUILD_CONFIG="$<CONFIG>")
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
     target_compile_definitions(skate3 PRIVATE SKATE3_HAS_TITLE_UPDATE=1)
@@ -294,7 +341,7 @@ if(APPLE)
 endif()
 
 if(WIN32)
-    target_link_libraries(skate3 PRIVATE comdlg32 winhttp)
+    target_link_libraries(skate3 PRIVATE comdlg32 winhttp d3dcompiler gdiplus)
 endif()
 
 add_custom_target(skate3_stage_runtime_library
