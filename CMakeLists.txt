@@ -210,6 +210,13 @@ if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
         SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG)
     file(TO_CMAKE_PATH "${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX}"
         SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG)
+    # These derive from CMAKE_CURRENT_BINARY_DIR, which is an MSYS path (/d/...)
+    # when configuring from devkitPro's shell. rexglue.exe is a native Windows
+    # binary and cannot open those, and a patched image it fails to open is
+    # silently ignored - codegen falls back to the retail XEX and then reports
+    # unresolved calls, which looks exactly like building with no title update.
+    _skate3_msys_to_windows_path(SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG)
+    _skate3_msys_to_windows_path(SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG)
     set(SKATE3_PATCHED_DEFAULT_XEX_LINE
         "patched_file_path = \"${SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG}\"")
     set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE
@@ -236,7 +243,13 @@ set(REXGLUE_ENABLE_TRACY OFF CACHE BOOL "Disable Tracy instrumentation for norma
 set(REXGLUE_ENABLE_PERF_COUNTERS OFF CACHE BOOL "Enable lightweight rexglue perf counter instrumentation")
 
 include(cmake/RexGlue.cmake)
-include(cmake/CodegenTargets.cmake)
+# The codegen convenience targets (generate-all etc.) drive the host-only
+# rex::rexglue CLI, which is not built for Switch. On Switch the generated
+# sources are produced on the host beforehand and merely consumed here, so
+# these targets are neither runnable nor needed.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    include(cmake/CodegenTargets.cmake)
+endif()
 
 set(SKATE3_COMMON_SOURCES
     src/exception_compat.cpp
@@ -392,6 +405,16 @@ else()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR SWITCH)
+    # Mesa's SPIRV-Tools unconditionally defines a SPIRV-Tools-shared SHARED
+    # target. Horizon cannot load shared objects and nothing here links it
+    # (skate3 uses the static libSPIRV-Tools.a), yet it is built as part of
+    # "all" and fails to link because -lnx (appended to every link, see
+    # cmake/Switch.cmake) is unavailable on the shared-link search path. Drop it
+    # from the build; the static library is unaffected.
+    if(TARGET SPIRV-Tools-shared)
+        set_target_properties(SPIRV-Tools-shared PROPERTIES EXCLUDE_FROM_ALL ON)
+    endif()
+
     # ------------------------------------------------------------------
     # Mesa NVK Vulkan driver (statically linked ICD).
     # The Switch has no Vulkan loader; a prebuilt NVK libvulkan.a supplies the
@@ -414,11 +437,29 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR SWITCH)
         endif()
         # Force-keep the ICD entry points so they override the weak stubs and are
         # not dropped by --gc-sections, then link the driver and its deps.
+        # NVK's libvulkan.a ships a switch_libc_shim.o that intercepts a handful
+        # of libc file calls via the linker's --wrap mechanism (its __wrap_open
+        # etc. reference __real_open, which only resolves with --wrap=open). The
+        # ICD entry points are kept strong via -u above, not wrapped.
         target_link_options(skate3 PRIVATE
             "-Wl,-u,vk_icdGetInstanceProcAddr"
-            "-Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion")
+            "-Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion"
+            "-Wl,--wrap=open" "-Wl,--wrap=close"
+            "-Wl,--wrap=stat" "-Wl,--wrap=lstat")
+        # --whole-archive is REQUIRED, not an optimisation. vulkan_icd_stub_switch.cpp
+        # provides __attribute__((weak)) fallbacks for vk_icdGetInstanceProcAddr and
+        # the instance entrypoints so the app links (and fails cleanly) when no NVK
+        # driver is supplied. But a weak definition SATISFIES the -u references above,
+        # so the linker never extracts NVK's strong definitions from the archive -
+        # leaving the stubs in place: Stub_CreateInstance returns
+        # VK_ERROR_INITIALIZATION_FAILED and Stub_Enumerate* report nothing, exactly
+        # the failure seen on device. Forcing the whole archive in pulls NVK's strong
+        # symbols, which override the weak stubs (and also resolves Mesa's weak-undef
+        # dispatch entrypoints). --gc-sections trims the unused remainder afterwards.
         target_link_libraries(skate3 PRIVATE
+            "-Wl,--whole-archive"
             "${SKATE3_NVK_LIBRARY}"
+            "-Wl,--no-whole-archive"
             ${SKATE3_NVK_EXTRA_LIBS})
     else()
         message(WARNING

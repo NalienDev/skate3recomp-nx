@@ -35,3 +35,7 @@ CMakeUserPresets.json
 
 # Local developer scripts (texture decoding, extraction, bootstrap helpers)
 /scripts/
+
+# Skate 3 Title Update 3 STFS package (licensed game content; supply your own).
+# Codegen picks it up from the repo root; see README / CMakeLists SKATE3_TITLE_UPDATE_PACKAGE.
+/TU_12K2276_*

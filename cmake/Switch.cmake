@@ -51,7 +51,14 @@ add_compile_definitions(SPDLOG_NO_EXCEPTIONS)
 # (e.g. dlfcn.h required by volk; not present in devkitA64's sysroot)
 include_directories(BEFORE SYSTEM "${CMAKE_CURRENT_LIST_DIR}/switch_stubs")
 
-set(ARCH "-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE")
+# -ftls-model=local-exec is REQUIRED, not an optimization: devkitA64's linker
+# mis-relaxes the default initial-exec TLS access sequence into `ldr x0,[x0,x0]`
+# (an effective load from 2*thread_pointer), which faults on the first access to
+# any `thread_local`. It bit spdlog's os::thread_id() here. A static PIE has a
+# single TLS template shared by every thread, so local-exec is always valid.
+# Must be in ARCH so it reaches every TU, including thirdparty archives
+# (libspdlog.a) that have their own thread_locals.
+set(ARCH "-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ftls-model=local-exec")
 # NOTE: exceptions and RTTI are LEFT ENABLED. The rexglue runtime and several
 # bundled libraries (Vulkan-Hpp, tomlplusplus, cli11, utfcpp, glslang) rely on
 # them, and the reference Switch ports (Marathon/Unleashed-NX) build with them
@@ -65,12 +72,25 @@ set(DEVKITA64 "${DEVKITPRO}/devkitA64")
 set(LIBNX "${DEVKITPRO}/libnx")
 set(PORTLIBS "${DEVKITPRO}/portlibs/switch")
 
-# Link against libnx via its spec file. switch.specs pulls in the Horizon crt0
-# startup and resolves runtime helpers such as __aarch64_read_tp (soft-TLS),
-# pthread, and the newlib syscall backend. Without it, every executable fails to
-# link. --allow-multiple-definition tolerates duplicate symbols from our libc
-# shims (mmap/ucontext) overlapping weak newlib stubs.
+# Link against libnx via its spec file. switch.specs supplies the Horizon linker
+# script, crt0 startup and the newlib syscall backend. Note it does NOT inject
+# -lnx itself, so libnx must be linked explicitly (below). --allow-multiple-
+# definition tolerates duplicate symbols from our libc shims (mmap/ucontext)
+# overlapping weak newlib stubs.
 set(CMAKE_EXE_LINKER_FLAGS_INIT "-specs=${LIBNX}/switch.specs -L${LIBNX}/lib -L${PORTLIBS}/lib -Wl,--gc-sections -Wl,--allow-multiple-definition")
+
+# libnx provides __aarch64_read_tp (the soft-TLS thread-pointer helper every
+# -mtp=soft TLS access calls) plus the Horizon WSI backend used by the NVK ICD
+# (nwindow*/framebuffer*/nvFence*/armDCacheFlush). Static archives such as
+# libspdlog.a and libvulkan.a reference these, so -lnx must appear AFTER them on
+# the link line. CMAKE_*_STANDARD_LIBRARIES is emitted last, guaranteeing that.
+string(APPEND CMAKE_C_STANDARD_LIBRARIES " -lnx")
+string(APPEND CMAKE_CXX_STANDARD_LIBRARIES " -lnx")
+# NOTE: -lnx is now appended to EVERY link, including shared libraries, whose
+# link flags lack the libnx -L search path (it lives in the exe flags above).
+# The only shared library in this build is Mesa's SPIRV-Tools-shared.so, which
+# nothing links and Horizon cannot load; the root CMakeLists excludes it from
+# the build on Switch rather than teaching every shared link to find libnx.
 
 if(CMAKE_HOST_WIN32)
     set(EXE_SUFFIX ".exe")

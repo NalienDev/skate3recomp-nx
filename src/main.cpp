@@ -50,6 +50,20 @@ class Skate3PureApp : public Skate3BaseApp {
 #if defined(__SWITCH__)
 #include <switch.h>
 #include <rex/bootlog_switch.h>
+
+// libnx runtime configuration, overriding the weak defaults in the executable
+// image itself (weak symbols in a linked library are invisible to libnx's crt0,
+// exactly like NvOptimusEnablement above). Mesa NVK brings the GPU up through
+// the nv service and a GPFIFO channel during Vulkan init; that allocation
+// exceeds the default LibraryApplet memory pool, so vkCreateInstance fails with
+// VK_ERROR_INITIALIZATION_FAILED. Running as a full Application with the whole
+// memory pool (heap_size 0 => libnx takes all that remains) is the configuration
+// every NVK-on-Switch reference app uses.
+extern "C" {
+u32 __nx_applet_type = AppletType_Application;
+size_t __nx_heap_size = 0;
+}
+
 struct SwitchInitHelper {
   SwitchInitHelper() {
     // Crash-proof early logging: reopened and flushed per line, so it survives

@@ -112,7 +112,10 @@
       "toolchainFile": "${sourceDir}/cmake/Switch.cmake",
       "cacheVariables": {
         "REXGLUE_USE_VULKAN": "ON",
-        "REXGLUE_USE_D3D12": "OFF"
+        "REXGLUE_USE_D3D12": "OFF",
+        "SKATE3_NVK_LIBRARY": "/d/Projetos/switch-nvk/nvk-switch/lib/libvulkan.a",
+        "SKATE3_NVK_ROOT": "/d/Projetos/switch-nvk/nvk-switch",
+        "SKATE3_NVK_EXTRA_LIBS": "z;zstd;expat"
       }
     },
     {

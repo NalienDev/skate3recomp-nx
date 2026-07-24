@@ -59,6 +59,20 @@ __declspec(noinline) bool GuestTryCopy(void* dst, const void* src, size_t size) 
     return false;
   }
 }
+#elif defined(__SWITCH__)
+// Horizon delivers no CPU faults as POSIX signals, so the runtime's
+// rex::arch::ExceptionHandler::Install is a no-op on Switch (see
+// exception_handler_posix.cpp) - the GuestCopyFaultHandler below could never be
+// invoked, making the sigsetjmp landing pad unreachable. The failure mode the
+// guard exists for also cannot occur here: guest "decommit" is a Protect()
+// no-op that never unmaps the page, so a captured range stays physically
+// readable even after the streaming thread releases it. The guard is therefore
+// both inoperable and unnecessary; a plain copy is the correct behaviour.
+// (newlib additionally lacks sigjmp_buf / sigsetjmp / siglongjmp.)
+bool GuestTryCopy(void* dst, const void* src, size_t size) {
+  std::memcpy(dst, src, size);
+  return true;
+}
 #else
 // POSIX guard with the same clean-failure semantics as the SEH path: a
 // handler registered in the runtime's exception chain (SIGSEGV/SIGBUS both
