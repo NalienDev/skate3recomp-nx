@@ -49,8 +49,13 @@ class Skate3PureApp : public Skate3BaseApp {
 
 #if defined(__SWITCH__)
 #include <switch.h>
+#include <rex/bootlog_switch.h>
 struct SwitchInitHelper {
   SwitchInitHelper() {
+    // Crash-proof early logging: reopened and flushed per line, so it survives
+    // the process dying. It is the only diagnostic channel available before
+    // the real logger exists, and on a console with no stdout.
+    rex::bootlog::Begin();
     romfsInit();
     socketInitializeDefault();
   }

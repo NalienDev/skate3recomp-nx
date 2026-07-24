@@ -563,10 +563,14 @@ bool DownloadToFile(const std::string& url, const std::filesystem::path& destina
     std::string detail;
     if (status == -1) {
       detail = "curl could not be launched";
+#if !defined(__SWITCH__)
+      // Horizon has no <sys/wait.h> and no process spawning, so the wait-status
+      // decoding macros do not exist there; report the raw status instead.
     } else if (WIFEXITED(status)) {
       detail = "curl exit code " + std::to_string(WEXITSTATUS(status));
     } else if (WIFSIGNALED(status)) {
       detail = "curl terminated by signal " + std::to_string(WTERMSIG(status));
+#endif
     } else {
       detail = "curl status " + std::to_string(status);
     }
