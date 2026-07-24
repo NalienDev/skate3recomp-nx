@@ -126,5 +126,14 @@ foreach(_file IN LISTS _skate3_recomp_files)
   break()
 endforeach()
 if(NOT _demo_path_movie_patched)
-  message(FATAL_ERROR "Failed to apply Skate 3 demo path intro movie patch; FEMoviePlayer::Update anchor not found")
+  # FEMoviePlayer::Update (sub_825E0510) and the call it guards (sub_825D60C8)
+  # are only emitted when codegen runs against the title-update-patched XEX.
+  # Without a title update they are absent from the generated tree entirely, so
+  # this patch has nothing to attach to. That is expected, not a failure: the
+  # patch only skips the demo-path intro movie. The frustum and projection-FOV
+  # patches above are independent and still apply.
+  message(WARNING
+    "Skipped Skate 3 demo path intro movie patch: FEMoviePlayer::Update anchor "
+    "not present. This is expected when generating without a title update; the "
+    "intro movie simply will not be auto-skipped.")
 endif()

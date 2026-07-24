@@ -132,6 +132,21 @@ endif()
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}" SKATE3_SOURCE_DIR_CONFIG)
 file(TO_CMAKE_PATH "${SKATE3_GAME_DATA_ROOT}" SKATE3_GAME_DATA_ROOT_CONFIG)
 
+# These land in the codegen manifests, which are read by rexglue.exe - a native
+# Windows binary. When CMake itself runs under MSYS2 the paths come out as MSYS
+# mount points ("/d/Projetos/..."), which that binary cannot open, and codegen
+# fails with "included file not found". file(TO_CMAKE_PATH) does not translate
+# mount points, so map a leading "/<drive>/" to "<DRIVE>:/" explicitly.
+function(_skate3_msys_to_windows_path _var)
+    set(_value "${${_var}}")
+    if(_value MATCHES "^/([a-zA-Z])/(.*)$")
+        string(TOUPPER "${CMAKE_MATCH_1}" _drive)
+        set(${_var} "${_drive}:/${CMAKE_MATCH_2}" PARENT_SCOPE)
+    endif()
+endfunction()
+_skate3_msys_to_windows_path(SKATE3_SOURCE_DIR_CONFIG)
+_skate3_msys_to_windows_path(SKATE3_GAME_DATA_ROOT_CONFIG)
+
 set(SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE "${SKATE3_TITLE_UPDATE_PACKAGE}")
 if(SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
     set(SKATE3_LOCAL_TITLE_UPDATE_PACKAGE
