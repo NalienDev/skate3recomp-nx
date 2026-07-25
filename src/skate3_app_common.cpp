@@ -1170,7 +1170,8 @@ void Skate3BaseApp::InstallRecipeOverlay() {
   }
 
   const auto content_root = runtime()->game_data_root() / "data" / "content";
-  if (!std::filesystem::exists(content_root)) {
+  std::error_code content_ec;
+  if (!std::filesystem::exists(content_root, content_ec) || content_ec) {
     REXLOG_WARN("Skipping Skate 3 recipe VFS overlay; content root not found: {}",
                 content_root.string());
     return;
@@ -1287,7 +1288,12 @@ void Skate3BaseApp::InstallDlcPackages() {
   size_t skipped_count = 0;
 
   for (const auto& source_dir : source_dirs) {
-    if (!std::filesystem::is_directory(source_dir)) {
+    // Use the error_code overloads throughout: on Horizon these paths are
+    // device-prefixed (sdmc:/...), and the throwing overloads of
+    // is_directory/is_regular_file raise std::filesystem_error, which is
+    // uncaught here and terminates the process (crash in OnPostSetup).
+    std::error_code dir_ec;
+    if (!std::filesystem::is_directory(source_dir, dir_ec) || dir_ec) {
       continue;
     }
 
@@ -1298,7 +1304,8 @@ void Skate3BaseApp::InstallDlcPackages() {
                     iter_ec.message());
         break;
       }
-      if (!entry.is_regular_file()) {
+      std::error_code file_ec;
+      if (!entry.is_regular_file(file_ec) || file_ec) {
         continue;
       }
 
