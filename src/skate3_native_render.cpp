@@ -22,6 +22,7 @@
 #endif
 
 #include <rex/cvar.h>
+#include <rex/platform.h>
 #include <rex/logging.h>
 #include <rex/ui/window.h>
 
@@ -370,6 +371,16 @@ void Install() {
   if (!g_announced.exchange(true)) {
     REXLOG_INFO(
         "native-render hook layer enabled");
+#if REX_PLATFORM_SWITCH
+    // The native renderer's desktop defaults are far beyond what a Switch can
+    // hold: 4x MSAA plus HDR targets and a 12288x4096 static sun-shadow atlas
+    // (~200 MB for that texture alone) on a shared 4 GB pool. Scale them down
+    // before the scene allocates anything.
+    rex::cvar::SetFlagByName("skate3_native_render_scene_msaa", "1");
+    rex::cvar::SetFlagByName("skate3_native_render_scene_hdr", "false");
+    rex::cvar::SetFlagByName("skate3_native_render_scene_shadow_static_size", "1024");
+    REXLOG_INFO("native-render: Switch memory profile (MSAA x1, no HDR, 1024 static shadow)");
+#endif
   }
   skate3::native_scene::Install();
 }
