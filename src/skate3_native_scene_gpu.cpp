@@ -5228,7 +5228,18 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
     // compile stalls invisibly.
     static bool s_async_forced = false;
     static bool s_async_saved = false;
-    if (want && !s_async_forced) {
+#if defined(__SWITCH__)
+    // The stalls are only "invisible" where a pipeline compiles in single-digit
+    // milliseconds. On NVK they do not: measured 13.8 s of PSO creation for 40
+    // pipelines in ONE frame (~345 ms each), which stops the guest dead at the
+    // loading screen instead of merely delaying a portrait. Keep compilation
+    // async here and accept that a one-shot portrait may miss a still-compiling
+    // piece on a cold shader cache.
+    const bool want_sync_compile = false;
+#else
+    const bool want_sync_compile = want;
+#endif
+    if (want_sync_compile && !s_async_forced) {
       s_async_saved = REXCVAR_GET(async_shader_compilation);
       if (s_async_saved) {
         REXCVAR_SET(async_shader_compilation, false);
@@ -5237,7 +5248,7 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
             "(one-shot portrait renders can't skip still-compiling pieces)");
       }
       s_async_forced = true;
-    } else if (!want && s_async_forced) {
+    } else if (!want_sync_compile && s_async_forced) {
       if (s_async_saved) {
         REXCVAR_SET(async_shader_compilation, true);
       }
