@@ -60,7 +60,12 @@ bool GuestTryCopy(void* dst, const void* src, size_t size);
 // ArmGuestReadRecoveryForThread: permanently arm a thread that only ever
 // reads guest memory on the renderer's behalf (the render thread, the
 // prewarm decode workers). Idempotent and cheap; call per frame/iteration.
-#if defined(_WIN32)
+// Switch joins the no-op path: Horizon delivers no CPU faults as POSIX signals,
+// so rex::arch::ExceptionHandler::Install is inert there and the sigsetjmp
+// landing pad could never be reached (the same reasoning as the __SWITCH__
+// GuestTryCopy in the .cpp, which is a plain memcpy). newlib also lacks
+// sigjmp_buf / sigsetjmp / siglongjmp.
+#if defined(_WIN32) || defined(__SWITCH__)
 class GuestReadRecoveryScope {
  public:
   explicit GuestReadRecoveryScope(uint8_t* /*base*/) {}
