@@ -6097,7 +6097,7 @@ void EnsureCamSampler() {
   if (g_cam_sampler_started.exchange(true, std::memory_order_acq_rel)) {
     return;
   }
-  std::thread(CamSamplerLoop).detach();
+  skate3::native_scene::SpawnDetachedWorker(CamSamplerLoop);
   REXLOG_INFO("native-scene: camera sampler thread started (~1 kHz)");
 }
 

@@ -4751,7 +4751,7 @@ void EnsurePrewarmWorkers() {
   // renderer.
   const unsigned n = std::clamp(hw / 3u, 2u, 8u);
   for (unsigned i = 0; i < n; ++i) {
-    std::thread(PrewarmWorkerLoop).detach();
+    SpawnDetachedWorker(PrewarmWorkerLoop);
   }
   REXLOG_INFO("native-scene: {} prewarm decode workers started", n);
 }

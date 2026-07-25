@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 #include "generated/skate3_init.h"
 
@@ -18,6 +19,8 @@
 #include <unistd.h>
 
 #include <atomic>
+
+#include <rex/logging.h>
 #include <csetjmp>
 #include <mutex>
 
@@ -25,6 +28,31 @@
 #endif
 
 namespace skate3::native_scene {
+
+void SpawnDetachedWorker(void (*entry)()) {
+#if defined(__SWITCH__)
+  // 4 MiB: comfortably above the decode loops' frames, and small enough that
+  // the handful of workers here stay cheap.
+  constexpr size_t kWorkerStackBytes = 4u * 1024u * 1024u;
+  pthread_attr_t attr;
+  if (pthread_attr_init(&attr) == 0) {
+    pthread_attr_setstacksize(&attr, kWorkerStackBytes);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t tid;
+    auto trampoline = [](void* fn) -> void* {
+      reinterpret_cast<void (*)()>(fn)();
+      return nullptr;
+    };
+    int rc = pthread_create(&tid, &attr, trampoline, reinterpret_cast<void*>(entry));
+    pthread_attr_destroy(&attr);
+    if (rc == 0) {
+      return;
+    }
+    REXLOG_ERROR("SpawnDetachedWorker: pthread_create failed ({}); falling back", rc);
+  }
+#endif
+  std::thread(entry).detach();
+}
 
 // Lock-free guarded bulk copy for reads of guest payloads (shared here so
 // every TU uses the one correctly-built guard). GuestRangeReadable's
@@ -74,6 +102,22 @@ __declspec(noinline) bool GuestTryCopy(void* dst, const void* src, size_t size) 
 // both inoperable and unnecessary; a plain copy is the correct behaviour.
 // (newlib additionally lacks sigjmp_buf / sigsetjmp / siglongjmp.)
 bool GuestTryCopy(void* dst, const void* src, size_t size) {
+  // Every caller copies into a small fixed host buffer (largest today is
+  // 96 rows * 16 floats = 6 KiB) with a guest-derived count. Horizon delivers no
+  // CPU faults, so unlike the SEH/POSIX paths there is nothing here to catch a
+  // runaway size: an out-of-range count would memcpy straight over the host
+  // stack, which is exactly the corruption signature being chased (a later `ret`
+  // through a smashed x30 lands at the image base). Refuse implausible sizes and
+  // say so rather than scribbling.
+  constexpr size_t kMaxGuestCopy = 64 * 1024;
+  if (size > kMaxGuestCopy) {
+    static std::atomic<uint32_t> c{0};
+    if (c.fetch_add(1, std::memory_order_relaxed) < 16) {
+      REXLOG_ERROR("GuestTryCopy: refusing implausible size {} bytes (dst={} src={})", size, dst,
+                   src);
+    }
+    return false;
+  }
   std::memcpy(dst, src, size);
   return true;
 }

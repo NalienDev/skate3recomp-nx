@@ -86,6 +86,16 @@ void ArmGuestReadRecoveryForThread(uint8_t* base);
 uint64_t GuestReadRecoveryCount();
 #endif
 
+// Spawn a detached background worker.
+//
+// std::thread gives a thread the platform's DEFAULT stack, which is megabytes
+// on desktop but only tens of KB under devkitA64/newlib. The renderer's decode
+// workers hold multi-KB frames (96x16 float scratch buffers and friends) and
+// overflow that, corrupting whatever sits below the stack -- which surfaces
+// later as a return through a smashed x30. Route them through pthread with an
+// explicit stack size on Switch; elsewhere std::thread is fine.
+void SpawnDetachedWorker(void (*entry)());
+
 float GuestHalfToFloat(uint16_t h);
 
 // Bind-pose bbox diagonal of the item: the reference size every
