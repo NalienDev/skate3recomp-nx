@@ -49,6 +49,10 @@ class Skate3PureApp : public Skate3BaseApp {
 
 #if defined(__SWITCH__)
 #include <switch.h>
+#include <pthread.h>
+
+#include <atomic>
+
 #include <rex/bootlog_switch.h>
 
 // libnx runtime configuration, overriding the weak defaults in the executable
@@ -64,6 +68,75 @@ u32 __nx_applet_type = AppletType_Application;
 size_t __nx_heap_size = 0;
 }
 
+// Applet lifecycle. Horizon expects an application to pump the applet message
+// queue; that is how it learns the app has acknowledged losing focus so the
+// system can take the display for the HOME menu or a sleep transition.
+//
+// Nothing here did that, and the consequence is not a dead app -- it is a dead
+// CONSOLE. Pressing HOME made the compositor wait forever for a surface this
+// process never yielded, so the whole system appeared frozen and only a
+// power-button hold recovered it.
+//
+// A dedicated thread owns the pump, because it must keep running even when the
+// render or guest threads are wedged (a hung Vulkan present is exactly when the
+// user reaches for HOME). When the system asks us to exit, the recompiled guest
+// has no clean shutdown path to run -- a dozen guest threads sit in kernel waits
+// and the timer queue's dispatch thread would execute unmapped code once libnx
+// hands the NRO's memory back. So the flag is published for anyone who can act
+// on it, the log is flushed, and then the process is taken down at the kernel
+// level with svcExitProcess. That cannot hang, and it guarantees the kernel
+// reclaims the display and hbloader comes back instead of the console wedging.
+namespace {
+
+std::atomic<bool> g_applet_pump_running{false};
+std::atomic<bool> g_applet_exit_requested{false};
+pthread_t g_applet_pump_thread{};
+bool g_applet_pump_started = false;
+
+void* AppletPumpMain(void*) {
+  while (g_applet_pump_running.load(std::memory_order_relaxed)) {
+    if (!appletMainLoop()) {
+      g_applet_exit_requested.store(true, std::memory_order_release);
+      // REX_BOOTLOG opens/flushes/closes per call, so the line is already on the
+      // card by the time this returns.
+      REX_BOOTLOG("APPLET exit requested by the system; terminating");
+      // Brief grace period so an in-flight log line lands, then go down hard.
+      svcSleepThread(250000000ULL);  // 250 ms
+      svcExitProcess();
+    }
+    svcSleepThread(16666667ULL);  // ~60 Hz
+  }
+  return nullptr;
+}
+
+void StartAppletPump() {
+  g_applet_pump_running.store(true, std::memory_order_relaxed);
+  // Explicit stack size: newlib gives raw threads a small default, and this
+  // thread must be the one that never dies.
+  pthread_attr_t attr;
+  if (pthread_attr_init(&attr) != 0) {
+    REX_BOOTLOG("APPLET pump: pthread_attr_init failed; HOME will not be safe");
+    return;
+  }
+  pthread_attr_setstacksize(&attr, 64u * 1024u);
+  int rc = pthread_create(&g_applet_pump_thread, &attr, AppletPumpMain, nullptr);
+  pthread_attr_destroy(&attr);
+  if (rc != 0) {
+    g_applet_pump_running.store(false, std::memory_order_relaxed);
+    REX_BOOTLOG("APPLET pump: pthread_create failed rc=%d; HOME will not be safe", rc);
+    return;
+  }
+  g_applet_pump_started = true;
+  REX_BOOTLOG("APPLET pump started");
+}
+
+}  // namespace
+
+// True once the system has asked the application to exit.
+extern "C" bool skate3_switch_exit_requested() {
+  return g_applet_exit_requested.load(std::memory_order_acquire);
+}
+
 struct SwitchInitHelper {
   SwitchInitHelper() {
     // Crash-proof early logging: reopened and flushed per line, so it survives
@@ -72,8 +145,14 @@ struct SwitchInitHelper {
     rex::bootlog::Begin();
     romfsInit();
     socketInitializeDefault();
+    StartAppletPump();
   }
   ~SwitchInitHelper() {
+    g_applet_pump_running.store(false, std::memory_order_relaxed);
+    if (g_applet_pump_started) {
+      pthread_join(g_applet_pump_thread, nullptr);
+      g_applet_pump_started = false;
+    }
     socketExit();
     romfsExit();
   }
