@@ -10,10 +10,11 @@ An unofficial **Nintendo Switch homebrew** port of the Xbox 360 version of Skate
 built by static recompilation. This repository is the Switch fork; the desktop
 (Windows/Linux/macOS) builds live upstream and are not maintained here.
 
-> **⚠️ This port is NOT playable yet.** It boots, initialises the GPU, loads game
-> data and renders roughly one frame, then the guest deadlocks. See
-> [Current status](#current-status) below. **Help is very welcome** — the
-> investigation is documented in detail so anyone can pick it up.
+> **⚠️ This port is NOT playable yet**, but it does now render. It boots, loads
+> the game, and reaches the **language select screen** at roughly **9 fps** with
+> unreadable (blocky) text, then dies shortly after the Skate 3 logo. See
+> [Current status](#current-status). **Help is very welcome** — the whole
+> investigation is documented so anyone can pick it up.
 
 The project does not include Skate 3 retail game files. To run or build it you
 must provide files from your own legally obtained Xbox 360 copy of Skate 3.
@@ -27,76 +28,91 @@ must provide files from your own legally obtained Xbox 360 copy of Skate 3.
 - **Vulkan works** through a statically linked **Mesa NVK** driver (there is no
   Vulkan loader on Horizon). Reports `NVIDIA Tegra X1 (NVK GM20B)`, Mesa 25.0.7.
 - **Guest memory** — a libnx `virtmem` backend commits the guest address space on
-  demand and correctly aliases the physical mirrors (`0x7F000000`, `0xA0000000`,
-  `0xC0000000`, `0xE0000000`, physical membase) onto one backing, so the GPU
-  command processor and the guest see the same bytes.
-- **The Xenos command processor runs**: the PM4 ring is read correctly, draws
-  execute, fences are written, and one frame reaches `IssueSwap` and is presented.
-- **Display and presentation are proven working** (overlays render on the panel).
+  demand and eagerly mirrors every physical commit into all of its windows
+  (`0x7F000000`, `0xA0000000`, `0xC0000000`, `0xE0000000` with its 4 KB skew, and
+  the physical membase) so any mirror address is valid the moment the page exists.
+- **The Xenos command processor runs**: the PM4 ring executes, draws submit,
+  fences write back, and frames present continuously.
+- **It renders.** The game reaches the language select screen and keeps drawing.
+- **Kernel timers work** (this was the long-standing blocker — see below).
 - **Controller input** via a native libnx HID driver, including rumble.
+- **HOME is safe.** An applet pump thread keeps Horizon's message queue serviced,
+  so pressing HOME exits to hbmenu instead of wedging the console.
 - **Audio, the BIG-archive VFS, DLC discovery and TU3 patching** are wired up.
 
-### What does not work — the blocker
+### What does not work
 
-After the first frame the guest stops making progress. Terminal state, measured
-on hardware:
+Current state, in the order you will hit it:
 
-- 8–9 guest threads parked in kernel waits, several in a mutual wait.
-- The main guest thread blocked on an event whose only producers are themselves
-  blocked.
-- Three job-pool workers spin-polling private events at ~1000 waits/second that
-  **nothing ever signals** (`XEvent::Set` is traced at the object level, so this
-  covers kernel-internal signalling too).
-- **One guest thread blocked forever on a kernel `TIMER` object with an infinite
-  timeout** — the current prime suspect and the most recent finding. It is one of
-  only two producers of the event the main thread needs, so if the timer never
-  fires the whole graph is stuck.
-- The GPU is idle and fully drained; the 60 Hz vblank interrupt and the guest's
-  graphics ISR keep running normally the whole time.
+1. **Text renders as solid blocks.** Font/glyph output is unreadable on the
+   language select screen. Not yet diagnosed. Note the `Direct resolve fallback
+   (cvar-disabled)` lines in the log are a red herring — that is the opt-in
+   `vulkan_direct_resolve_fast32` fast path being off, and the fallback route is
+   the correct one.
+2. **~9 fps** at the menu, at 640x360 with `draw_resolution_scale 1x1`. No
+   profiling done yet. `vulkan_direct_resolve_fast32` may help, but it is
+   described in-tree as a narrow prototype and may introduce artefacts.
+3. **Dies shortly after the Skate 3 logo** — screen goes black and the process
+   stops. Since the applet-pump fix the console itself survives and HOME works,
+   but the cause of the app dying here is unknown. **This is the next thing to
+   chase.** No Atmosphère crash report was produced for it, so it is likely a hang
+   or a clean-ish abort rather than a CPU fault.
+4. The language select screen advanced to the logo **without any input**, which
+   suggests the input or menu-timing path is not behaving.
 
-**It is a race, not a fixed point.** Adding as little as ~15 log lines during
-thread startup moves the stall earlier (from "one frame presented" to "before the
-first swap"). Anything timing-sensitive changes the outcome.
+### Solved blockers worth knowing about
 
-### Ruled out, with on-device evidence
+These were each expensive to find; the details are in the git log.
 
-Please don't spend time re-testing these — each was disproven by measurement, not
-by reasoning:
+- **Post-first-frame deadlock — absolute timer due times.** `NtSetTimerEx` with a
+  *positive* `due_time` means an ABSOLUTE file time. Skate 3 computes its 60 Hz due
+  time as `-(target - now)`; when `now` overtakes `target` the value flips sign, so
+  an absolute time ~380 µs after the **1601 epoch** arrives — long past, which NT
+  fires immediately. Passing it through unclamped was fatal off-Windows: the POSIX
+  timer backend rebases onto `steady_clock` and a ~424-year delta in nanoseconds
+  **overflows int64**, so the deadline landed in the far future, the timer never
+  fired, and the thread waiting on it never woke — taking the main thread and the
+  whole job pool with it. Fixed by clamping a past absolute due time to now.
+  **Effect: 1 presented frame → 12, and 20 timer arms → 615.**
+- **C-window mirror Data Abort.** Guest code read `0xC3282384` (the `0xC0000000`
+  mirror of physical `0x03282384`) on a page that was live via a *different*
+  window. Desktop maps all mirrors up front as views of one file mapping; this
+  backend only mapped what was explicitly committed, and Horizon delivers no CPU
+  faults as POSIX signals so there is nothing to service on demand. Now every
+  physical commit is mirrored eagerly.
+- **Whole-console freeze on HOME.** Nothing pumped `appletMainLoop()`, so Horizon
+  never learned the app had yielded focus and the compositor waited forever on a
+  surface it could not reclaim. Only a power-button hold recovered it. Fixed with a
+  dedicated applet pump thread that falls back to `svcExitProcess()`.
+- **Raw guest loads in the native renderer.** The renderer's raw guest loads rely
+  on read-fault recovery, and Switch is on the no-op path. Added
+  `GuestReadable()` / `IsCommitted()` gating for the capture hooks.
 
-| Ruled out | Evidence |
-|---|---|
-| Both renderers | Identical stall with `skate3_native_render` true and false |
-| Rendering / presentation | One frame reaches `IssueSwap` and is presented |
-| A crash | No Atmosphere crash report for any stalled run |
-| vblank / the graphics ISR dying | `[isr]` heartbeat runs at 59.7 Hz indefinitely, `prev=0 ms` |
-| Event primitive bugs | Auto/manual reset, initial state, set/reset all verified correct |
-| Handle or object aliasing | Every reference to a given handle maps to the same guest object |
-| Async I/O completion events | Every `NtReadFile` uses `ev=0 apc=0` — no completion events at all |
-| I/O completion APCs | `apc_queued=0` (loader uses synchronous reads), `apc_deliver` healthy |
-| Guest spinlocks | Zero `[spinlock]` stalls over a 200k-spin threshold |
-| Thread death | No guest thread ever exits (`[guestthread]` EXIT/TERMINATE) |
-| `sched_yield` being a stub | libnx defines it (`nm` on `libnx.a`) → `svcSleepThread` |
-| `XEvent::Set`'s faked previous state | Guest always passes `previous_state_ptr = NULL` |
-| Global-kernel-lock starvation | vblank pacing fix landed, changed nothing |
+### Two lessons that cost the most time
+
+- **Never filter an object type out of an untimed-wait trace.** The first wait
+  instrumentation excluded timers (`objtype 13`) as "too noisy". That single
+  exclusion hid the one thread that mattered for about ten build cycles. Untimed
+  waits cannot flood a log — they block.
+- **Suspect clock-conversion overflow early.** Three separate bugs here have been
+  the same int64-nanosecond overflow (`kEffectivelyInfiniteWait`, the vblank
+  deadline, the timer due time). `timer_queue.cpp` still passes
+  `clock::time_point::max()` into `condition_variable::wait_until` — same class,
+  not yet guarded.
 
 ### Where to pick it up
 
-1. **The timer.** Find out whether the timer the guest waits on is ever *armed*.
-   `NtSetTimerEx` is now traced (`[timer] SetTimerEx handle=... due=... period_ms=...`).
-   If it is never armed, the guest expects something else to arm it. If it is armed
-   and never fires, the fault is in `PosixCondition<Timer>` /
-   `src/core/timer_queue.cpp` on Horizon — note that its dispatch thread is a raw
-   `std::jthread` (newlib gives raw threads small stacks — see the porting notes)
-   and that it passes `clock::time_point::max()` into
-   `condition_variable::wait_until`, which is the same overflow class that already
-   had to be fixed in `PosixConditionBase::Wait`.
-2. **The job pool.** All the parked threads belong to one worker pool sharing guest
-   entry `0x82F54D58`, dispatched via trampoline `0x82EEF128`, with the pool's wait
-   call site at `0x82EE78B8`. Disassembling the pool's protocol would say what is
-   *supposed* to signal those events.
-3. **Perf, once it runs.** `NtCreateEvent` costs a median **50 ms** on device
-   because every guest-object allocation hits the three-syscall commit path in
-   `guest_memory_switch.cpp`. Not the deadlock, but it will matter.
+1. **Why the app dies after the logo** (item 3 above) — the open question. Grab
+   `logs/skate3_NNN.log` plus `boot.log` from the same run.
+2. **The blocky font.** Needs a run that reaches the language screen and a look at
+   how glyph textures are being uploaded/resolved.
+3. **Perf.** 9 fps at 640x360 has plenty of headroom to investigate;
+   `NtCreateEvent` alone costs a median **50 ms** on device because every
+   guest-object allocation hits the three-syscall commit path in
+   `guest_memory_switch.cpp`.
+4. **Remaining raw guest loads.** Only the viewport/scissor capture hooks are
+   gated by `GuestReadable()`; the other structure walks in the native scene can
+   still fault the same way. Mechanical to fix with the same helper.
 
 ### Diagnostics built in
 
@@ -128,8 +144,9 @@ You need a modded Switch running Atmosphere (or equivalent) and homebrew access.
 4. Launch it from hbmenu or Sphaira. Settings are written to
    `sdmc:/switch/skate3/settings.toml`, logs to `sdmc:/switch/skate3/logs/`.
 
-Because it deadlocks after the first frame, this is currently only useful for
-development.
+It gets as far as the language select screen and then dies, so this is still only
+useful for development — but pressing HOME is safe now, so trying it will not cost
+you a hard power-off.
 
 ## Controls
 
@@ -219,17 +236,24 @@ git submodule update --init --recursive
 
 ## Contributing
 
-Help is genuinely wanted, particularly from anyone who knows Horizon threading or
-Xbox 360 kernel timer semantics. Useful right now:
+Help is genuinely wanted. Useful right now, roughly in order of value:
 
-- Anything that explains the timer that never fires.
-- Reading the job pool's protocol at `0x82F54D58` / `0x82EE78B8`.
+- **Why the app dies after the Skate 3 logo.** The current wall.
+- **The blocky font** — anyone who knows how Skate 3 uploads its glyph atlases,
+  or who can spot a resolve/texture-format problem from a log.
+- **Performance.** 9 fps at 640x360; nothing has been profiled yet.
+- **Horizon threading and Xbox 360 kernel semantics** generally — three bugs so
+  far have been Horizon behaving differently from Windows in ways the shared
+  runtime did not anticipate.
 - Comparing against another Switch recomp port's threading layer — the
   Marathon/Unleashed NX ports share this memory architecture.
 
-If you report a stall, please attach both `boot.log` and the matching
-`logs/skate3_NNN.log` **from the same run** — the PC symbolication workflow needs
-the pair.
+If you report a crash or a stall, please attach **both** `boot.log` and the
+matching `logs/skate3_NNN.log` **from the same run** — Horizon re-randomises the
+image base every boot, so a report paired with a different run's log produces
+nonsense offsets (a negative slide is the tell). Registers are often faster than
+the backtrace: `X27` holds the guest membase in recompiled code, so
+`fault_address - X27` gives the guest address directly.
 
 ## Credits
 
