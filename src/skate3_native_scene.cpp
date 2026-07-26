@@ -3353,7 +3353,13 @@ void OnRenderStateUpload(uint64_t mask, uint32_t bank, uint32_t ptr) {
 }
 
 void OnSetViewport(uint8_t* base, uint32_t viewport_ptr) {
-  if (viewport_ptr == 0) {
+  // GuestReadable is a no-op true off Switch. On Horizon the raw loads below have
+  // no fault recovery and the guest window is committed on demand, so a stale
+  // viewport pointer is a fatal Data Abort -- this hook is where the renderer
+  // crashed once the game got past its first frames. Skipping the update leaves
+  // the previous viewport in place, which is the same outcome the other platforms
+  // reach via their recovery path.
+  if (viewport_ptr == 0 || !GuestReadable(base, viewport_ptr, 6 * sizeof(uint32_t))) {
     return;
   }
   GuestReadRecoveryScope guest_read_recovery(base);
@@ -3363,7 +3369,7 @@ void OnSetViewport(uint8_t* base, uint32_t viewport_ptr) {
 }
 
 void OnSetScissor(uint8_t* base, uint32_t rect_ptr) {
-  if (rect_ptr == 0) {
+  if (rect_ptr == 0 || !GuestReadable(base, rect_ptr, 4 * sizeof(uint32_t))) {
     return;
   }
   GuestReadRecoveryScope guest_read_recovery(base);

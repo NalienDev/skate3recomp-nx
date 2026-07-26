@@ -25,6 +25,7 @@
 #include <mutex>
 
 #include <rex/exception_handler.h>
+#include <rex/memory/guest_memory_switch.h>
 #endif
 
 namespace skate3::native_scene {
@@ -118,8 +119,27 @@ bool GuestTryCopy(void* dst, const void* src, size_t size) {
     }
     return false;
   }
+  // Horizon commits the guest window on demand, so a stale or bogus guest
+  // pointer can land on a page that was never committed. There is no fault to
+  // catch here, so the committed set has to be consulted before touching it --
+  // otherwise this memcpy is a fatal Data Abort instead of a failed copy.
+  if (!rex::memory::switch_backend::IsCommitted(src, size)) {
+    static std::atomic<uint32_t> c{0};
+    if (c.fetch_add(1, std::memory_order_relaxed) < 16) {
+      REXLOG_WARN("GuestTryCopy: src {} +{} is not committed guest memory; failing the copy", src,
+                  size);
+    }
+    return false;
+  }
   std::memcpy(dst, src, size);
   return true;
+}
+
+bool GuestReadable(uint8_t* base, uint32_t addr, size_t size) {
+  if (!base || addr == 0 || size == 0) {
+    return false;
+  }
+  return rex::memory::switch_backend::IsCommitted(base + addr, size);
 }
 #else
 // POSIX guard with the same clean-failure semantics as the SEH path: a

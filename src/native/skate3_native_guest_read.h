@@ -86,6 +86,25 @@ void ArmGuestReadRecoveryForThread(uint8_t* base);
 uint64_t GuestReadRecoveryCount();
 #endif
 
+// Is it safe to raw-load `size` bytes at guest address `addr`?
+//
+// Windows can answer "always": its guest mapping is pagefile-backed, so a raw
+// load of a stale pointer reads meaningless-but-resident bytes and the callers'
+// plausibility gates reject the item. POSIX answers "always" too, because the
+// recovery handler above turns the fault into that same outcome.
+//
+// Horizon can do neither. It commits the guest window on demand and delivers no
+// CPU faults as POSIX signals, so a pointer into a never-committed page is a
+// fatal Data Abort -- which is exactly how the renderer died in
+// native_scene::OnSetViewport once the game started presenting frames (guest
+// read at 0x416375600, an address inside the reservation but never committed).
+// There the committed set has to be consulted up front.
+#if defined(__SWITCH__)
+bool GuestReadable(uint8_t* base, uint32_t addr, size_t size);
+#else
+inline bool GuestReadable(uint8_t* /*base*/, uint32_t /*addr*/, size_t /*size*/) { return true; }
+#endif
+
 // Spawn a detached background worker.
 //
 // std::thread gives a thread the platform's DEFAULT stack, which is megabytes
