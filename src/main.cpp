@@ -68,6 +68,12 @@ class Skate3PureApp : public Skate3BaseApp {
 extern "C" {
 u32 __nx_applet_type = AppletType_Application;
 size_t __nx_heap_size = 0;
+
+// drm_shim's release-build error hook. The shim now FAILS a submit when the GPU
+// faults or the drain times out instead of reporting success, and reports it
+// here. Without a sink those reports go nowhere, and a GPU fault is the one
+// thing worth knowing about.
+extern void (*g_drm_shim_err_sink)(const char*);
 }
 
 // Applet lifecycle. Horizon expects an application to pump the applet message
@@ -207,6 +213,12 @@ struct SwitchInitHelper {
     // Line buffering: a crash must not eat the line that explains it.
     std::setvbuf(stderr, nullptr, _IOLBF, 0);
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
+    // Surface GPU faults. drm_shim detected them all along and returned success
+    // anyway, so NVK kept feeding a channel the kernel had already reset until
+    // the display stack died with it -- that is the whole-console hang. It now
+    // fails the submit (VK_ERROR_DEVICE_LOST) and reports through this hook.
+    g_drm_shim_err_sink = [](const char* msg) { REX_BOOTLOG("%s", msg); };
 
     // NOTE: the NVK library is now packaged WITHOUT DRM_SHIM_DEBUG, so drm_shim
     // no longer traces every ioctl and no longer carries the pushbuf "peek" that
