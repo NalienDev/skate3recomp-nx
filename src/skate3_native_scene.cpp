@@ -1995,7 +1995,7 @@ bool BuildItemFromMesh(uint8_t* base, uint32_t mesh, DrawItem& item) {
   // byte at +(num_elements + 1) * 16.
   uint8_t desc_tab[32 * 16 + 1];
   const uint32_t desc_tab_bytes = num_elements * 16 + 1;
-  if (!GuestTryCopy(desc_tab, REX_RAW_ADDR(vdesc + 0x10), desc_tab_bytes)) {
+  if (!GuestTryCopyTo(desc_tab, sizeof(desc_tab), REX_RAW_ADDR(vdesc + 0x10), desc_tab_bytes)) {
     g_rej_chain.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
@@ -2154,7 +2154,7 @@ bool BuildItemFromMesh(uint8_t* base, uint32_t mesh, DrawItem& item) {
     const uint32_t channels = BSwap32(mat_head[2]);
     uint8_t chan_buf[32 * 0x20];
     if (num_channels != 0 && num_channels <= 32 && GuestReadableApprox(base, channels) &&
-        GuestTryCopy(chan_buf, REX_RAW_ADDR(channels), num_channels * 0x20)) {
+        GuestTryCopyTo(chan_buf, sizeof(chan_buf), REX_RAW_ADDR(channels), num_channels * 0x20)) {
       const auto chan_u32 = [&](uint32_t idx, uint32_t off) -> uint32_t {
         uint32_t v;
         std::memcpy(&v, chan_buf + idx * 0x20 + off, 4);

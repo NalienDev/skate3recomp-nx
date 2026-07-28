@@ -266,7 +266,7 @@ void SnapshotPack(uint8_t* base, uint32_t inst, bool ubt = false) {
   // 4x4-transposed interpretation from this one copy.
   const uint32_t fpr = ubt ? 16u : 12u;
   uint32_t raw[96 * 16];
-  if (!GuestTryCopy(raw, base + matrices, size_t(snap.rows) * fpr * 4)) {
+  if (!skate3::native_scene::GuestTryCopyTo(raw, sizeof(raw), base + matrices, size_t(snap.rows) * fpr * 4)) {
     c_pal_unreadable.fetch_add(1, std::memory_order_relaxed);
     return;
   }
@@ -350,7 +350,7 @@ void SnapshotLwEntity(uint8_t* base, uint32_t entity) {
       continue;
     }
     uint32_t raw[96 * 12];
-    if (!GuestTryCopy(raw, base + matrices, size_t(total) * 48)) {
+    if (!skate3::native_scene::GuestTryCopyTo(raw, sizeof(raw), base + matrices, size_t(total) * 48)) {
       continue;
     }
     // Byteswap OUTSIDE g_mu: this runs on the sim thread, and holding the

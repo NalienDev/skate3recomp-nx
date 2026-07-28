@@ -307,8 +307,13 @@ bool GuestTryCopyTo(void* dst, size_t dst_capacity, const void* src, size_t size
   if (size > dst_capacity) {
     static std::atomic<uint32_t> c{0};
     if (c.fetch_add(1, std::memory_order_relaxed) < 16) {
+      // This is the important one. Every caller here passes a guest-DERIVED length
+      // into a fixed host buffer, so a refusal means the guest handed us a count
+      // that would have overflowed it -- which is precisely the corruption that has
+      // been landing on unrelated threads as smashed stacks and roaming Instruction
+      // Aborts. Loud on purpose.
       REXLOG_ERROR(
-          "GuestTryCopy: refusing {} bytes into a {}-byte destination (dst={} src={} caller={})",
+          "GuestTryCopy: REFUSED {} bytes into a {}-byte destination (dst={} src={} caller={})",
           size, dst_capacity, dst, src,
 #if defined(_MSC_VER)
           nullptr

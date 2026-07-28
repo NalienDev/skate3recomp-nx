@@ -186,7 +186,7 @@ void OnLwEntityTick(uint8_t* base, uint32_t entity) {
           uint32_t raw[96 * 12];
           if (ok && total >= 1 && total <= 96 &&
               pal_used + total * 12 <= 8 * 96 * 12 &&
-              GuestTryCopy(raw, base + matrices, size_t(total) * 48)) {
+              skate3::native_scene::GuestTryCopyTo(raw, sizeof(raw), base + matrices, size_t(total) * 48)) {
             for (uint32_t f = 0; f < total * 12; ++f) {
               pal[pal_used + f] =
                   std::bit_cast<float>(__builtin_bswap32(raw[f]));

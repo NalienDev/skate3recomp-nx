@@ -156,7 +156,7 @@ bool LoadF32Block(uint8_t* base, uint32_t addr, float* out, uint32_t count) {
     return false;
   }
   uint32_t raw[16];
-  if (count > 16 || !GuestTryCopy(raw, base + addr, size_t(count) * 4)) {
+  if (count > 16 || !skate3::native_scene::GuestTryCopyTo(raw, sizeof(raw), base + addr, size_t(count) * 4)) {
     return false;
   }
   for (uint32_t i = 0; i < count; ++i) {
@@ -536,7 +536,7 @@ uint32_t ServeInstancePalette(uint8_t* base, uint32_t ctx, float* out,
     return 0;
   }
   uint32_t raw[96 * 12];
-  if (!GuestTryCopy(raw, base + matrices, size_t(count) * 48)) {
+  if (!skate3::native_scene::GuestTryCopyTo(raw, sizeof(raw), base + matrices, size_t(count) * 48)) {
     return 0;
   }
   for (uint32_t i = 0; i < count * 12; ++i) {
