@@ -287,6 +287,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_native_scene_gpu.cpp
     src/skate3_native_scene_post.cpp
     src/skate3_screenshot.cpp
+    src/skate3_switch_thread_stacks.cpp
     src/skate3_shader_disasm.cpp
     src/skate3_title_update_installer.cpp
     src/skate3_user_settings.cpp
@@ -453,6 +454,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR SWITCH)
     set(SKATE3_NVK_LIBRARY "" CACHE FILEPATH "Mesa/NVK Switch Vulkan static archive (libvulkan.a)")
     set(SKATE3_NVK_EXTRA_LIBS "drm_nouveau;zstd;z;nx"
         CACHE STRING "Extra link libraries required by the NVK libvulkan.a")
+
+    # Every thread in the image gets a usable stack. devkitA64's pthread default is
+    # 1 MiB and std::thread/std::jthread take it silently; that is far too small for
+    # the C++ machinery this runs off the main thread, and the overflow surfaces as
+    # an Instruction Abort at the image base in an unrelated function. Wrapping is
+    # the only way to reach libstdc++'s own pthread_create calls.
+    # See src/skate3_switch_thread_stacks.cpp.
+    target_link_options(skate3 PRIVATE "-Wl,--wrap=pthread_create")
 
     if(SKATE3_NVK_LIBRARY AND EXISTS "${SKATE3_NVK_LIBRARY}")
         message(STATUS "Skate 3: linking NVK Vulkan driver: ${SKATE3_NVK_LIBRARY}")
