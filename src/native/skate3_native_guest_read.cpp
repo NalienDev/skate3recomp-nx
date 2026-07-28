@@ -110,7 +110,14 @@ bool GuestTryCopy(void* dst, const void* src, size_t size) {
   // stack, which is exactly the corruption signature being chased (a later `ret`
   // through a smashed x30 lands at the image base). Refuse implausible sizes and
   // say so rather than scribbling.
-  constexpr size_t kMaxGuestCopy = 64 * 1024;
+  // The 64 KiB cap this used to carry was a stopgap from when nothing could tell a
+  // runaway guest-derived count from a real one. It is now actively harmful: the
+  // game legitimately copies framebuffer-sized blocks once it reaches the menus
+  // (921600 bytes is exactly 640x360x4, and 256 KiB blocks show up too), and every
+  // one of those was being refused. The real bound is the committed-set check
+  // below, which refuses anything the guest does not actually have mapped; this
+  // only has to stay under "obviously insane".
+  constexpr size_t kMaxGuestCopy = 16 * 1024 * 1024;
   if (size > kMaxGuestCopy) {
     static std::atomic<uint32_t> c{0};
     if (c.fetch_add(1, std::memory_order_relaxed) < 16) {
