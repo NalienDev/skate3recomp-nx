@@ -55,6 +55,7 @@ class Skate3PureApp : public Skate3BaseApp {
 #include <cstdio>
 
 #include <rex/bootlog_switch.h>
+#include <rex/switch_applet.h>
 
 // libnx runtime configuration, overriding the weak defaults in the executable
 // image itself (weak symbols in a linked library are invisible to libnx's crt0,
@@ -127,7 +128,11 @@ void* AppletPumpMain(void*) {
       last_state = state;
     }
 
-    if (state == AppletFocusState_InFocus) {
+    // A library applet we opened ourselves (the software keyboard) takes focus by
+    // definition. Terminating then would kill the app the instant the keyboard
+    // appeared -- and the keyboard is the only way past Skate 3's team-name
+    // prompt.
+    if (state == AppletFocusState_InFocus || rex::switch_applet::LibraryAppletOpen()) {
       out_of_focus_since = 0;
     } else {
       const uint64_t now = armGetSystemTick();
