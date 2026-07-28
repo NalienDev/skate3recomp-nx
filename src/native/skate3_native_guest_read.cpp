@@ -110,14 +110,20 @@ bool GuestTryCopy(void* dst, const void* src, size_t size) {
   // stack, which is exactly the corruption signature being chased (a later `ret`
   // through a smashed x30 lands at the image base). Refuse implausible sizes and
   // say so rather than scribbling.
-  // The 64 KiB cap this used to carry was a stopgap from when nothing could tell a
-  // runaway guest-derived count from a real one. It is now actively harmful: the
-  // game legitimately copies framebuffer-sized blocks once it reaches the menus
-  // (921600 bytes is exactly 640x360x4, and 256 KiB blocks show up too), and every
-  // one of those was being refused. The real bound is the committed-set check
-  // below, which refuses anything the guest does not actually have mapped; this
-  // only has to stay under "obviously insane".
-  constexpr size_t kMaxGuestCopy = 16 * 1024 * 1024;
+  // DO NOT RAISE THIS. It was briefly taken to 16 MiB on the theory that the
+  // 921600-byte requests in the log were legitimate framebuffer copies (that is
+  // exactly 640x360x4). They are not: every caller of this function copies into a
+  // small FIXED host buffer -- &raw is 4 bytes, head/desc_head/vb_words are tens
+  // of bytes -- with a guest-derived element count. A 900 KiB copy into those is a
+  // host stack smash, and raising the cap produced exactly that: the next run
+  // ended with filesystem structures written over the tail of the log.
+  //
+  // So a size beyond this range means the guest-derived count is garbage, and
+  // refusing is the correct, intended behaviour. IsCommitted() below is a
+  // separate check (is the SOURCE mapped) and does not bound the destination.
+  // If a caller ever genuinely needs a large copy, give it its own path with an
+  // explicit destination capacity rather than widening this.
+  constexpr size_t kMaxGuestCopy = 64 * 1024;
   if (size > kMaxGuestCopy) {
     static std::atomic<uint32_t> c{0};
     if (c.fetch_add(1, std::memory_order_relaxed) < 16) {
