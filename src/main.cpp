@@ -52,6 +52,7 @@ class Skate3PureApp : public Skate3BaseApp {
 #include <pthread.h>
 
 #include <atomic>
+#include <cstdio>
 
 #include <rex/bootlog_switch.h>
 
@@ -180,6 +181,28 @@ struct SwitchInitHelper {
     // the real logger exists, and on a console with no stdout.
     rex::bootlog::Begin();
     romfsInit();
+
+    // Give stdio somewhere real to go BEFORE anything else can use it.
+    //
+    // Horizon hands a homebrew process no stdout or stderr, and newlib's FILE
+    // objects for them are not usable as-is. That is fine until a library
+    // decides to log: Mesa's DRM shim calls shim_log() from inside
+    // nvk_queue_submit when it meets something it does not like, which reached
+    // _write_r through fflush and took a Data Abort on a null FILE -- the app died
+    // in the middle of a Vulkan present, on the main menu.
+    //
+    // Pointing both at a file makes any such log harmless, and captures whatever
+    // the driver was trying to say, which is the more interesting half.
+    if (!std::freopen("sdmc:/switch/skate3/stdio.log", "w", stderr)) {
+      REX_BOOTLOG("stdio: freopen(stderr) failed");
+    }
+    if (!std::freopen("sdmc:/switch/skate3/stdio.log", "a", stdout)) {
+      REX_BOOTLOG("stdio: freopen(stdout) failed");
+    }
+    // Line buffering: a crash must not eat the line that explains it.
+    std::setvbuf(stderr, nullptr, _IOLBF, 0);
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
     socketInitializeDefault();
     StartAppletPump();
   }
