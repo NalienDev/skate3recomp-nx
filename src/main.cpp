@@ -68,6 +68,9 @@ class Skate3PureApp : public Skate3BaseApp {
 extern "C" {
 u32 __nx_applet_type = AppletType_Application;
 size_t __nx_heap_size = 0;
+
+// Mesa drm_shim's log sink hook (see the note where it is assigned).
+extern void (*g_drm_shim_log_sink)(const char*);
 }
 
 // Applet lifecycle. Horizon expects an application to pump the applet message
@@ -207,6 +210,25 @@ struct SwitchInitHelper {
     // Line buffering: a crash must not eat the line that explains it.
     std::setvbuf(stderr, nullptr, _IOLBF, 0);
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
+    // Silence Mesa's DRM shim.
+    //
+    // The NVK library we link was built WITH DRM_SHIM_DEBUG (shim_log is present
+    // in libvulkan.a), so drm_shim traces EVERY ioctl -- and its default sink
+    // fopen()s sdmc:/nvk_drmshim.log and fflush()es per line. That is a
+    // synchronous SD-card write for every GPU operation, which is a large part of
+    // why the game runs at single-digit frame rates, and it is what faulted in
+    // shim_log on a null FILE at the main menu.
+    //
+    // The shim exports a sink hook that short-circuits all of that, so point it at
+    // a discard. This is a mitigation, not the fix: the real repair is rebuilding
+    // the NVK library without DRM_SHIM_DEBUG, which also removes the pushbuf
+    // "peek" that dereferences a BO's CPU mapping on every push whether or not
+    // logging is on -- that wild read is the nouveau_dispatch crash, and it cannot
+    // be disabled from here because the arguments are evaluated before shim_log
+    // is ever called.
+    g_drm_shim_log_sink = [](const char*) {};
+    REX_BOOTLOG("drm_shim: log sink discarded (built with DRM_SHIM_DEBUG)");
 
     socketInitializeDefault();
     StartAppletPump();
