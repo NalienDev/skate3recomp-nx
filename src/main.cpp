@@ -93,17 +93,53 @@ std::atomic<bool> g_applet_exit_requested{false};
 pthread_t g_applet_pump_thread{};
 bool g_applet_pump_started = false;
 
+[[noreturn]] void AppletTerminate(const char* why) {
+  g_applet_exit_requested.store(true, std::memory_order_release);
+  // REX_BOOTLOG opens/flushes/closes per call, so the line is already on the card
+  // by the time this returns.
+  REX_BOOTLOG("APPLET %s; terminating", why);
+  svcSleepThread(150000000ULL);  // 150 ms so an in-flight log line lands
+  svcExitProcess();
+  __builtin_unreachable();
+}
+
 void* AppletPumpMain(void*) {
+  // Time spent continuously out of focus before the process is taken down.
+  constexpr uint64_t kFocusGraceNs = 2000000000ULL;  // 2 s
+  uint64_t out_of_focus_since = 0;
+  AppletFocusState last_state = AppletFocusState_InFocus;
+
   while (g_applet_pump_running.load(std::memory_order_relaxed)) {
+    // An ExitRequested message is the clean path, but pressing HOME on an
+    // Application does not send one -- the system simply takes FOCUS and waits
+    // for the app to stop drawing. Nothing here can make the renderer stop: the
+    // guest drives it, and it may be wedged in NVK. Left alone the compositor
+    // waits on a surface it cannot reclaim and the whole console locks up, which
+    // is what a HOME press did.
     if (!appletMainLoop()) {
-      g_applet_exit_requested.store(true, std::memory_order_release);
-      // REX_BOOTLOG opens/flushes/closes per call, so the line is already on the
-      // card by the time this returns.
-      REX_BOOTLOG("APPLET exit requested by the system; terminating");
-      // Brief grace period so an in-flight log line lands, then go down hard.
-      svcSleepThread(250000000ULL);  // 250 ms
-      svcExitProcess();
+      AppletTerminate("exit requested by the system");
     }
+
+    const AppletFocusState state = appletGetFocusState();
+    if (state != last_state) {
+      REX_BOOTLOG("APPLET focus state -> %d", (int)state);
+      last_state = state;
+    }
+
+    if (state == AppletFocusState_InFocus) {
+      out_of_focus_since = 0;
+    } else {
+      const uint64_t now = armGetSystemTick();
+      if (out_of_focus_since == 0) {
+        out_of_focus_since = now;
+      } else if (armTicksToNs(now - out_of_focus_since) >= kFocusGraceNs) {
+        // Quitting to hbmenu is a far better outcome than a console that needs a
+        // power-button hold. Revisit if the renderer ever learns to idle on focus
+        // loss and hand the surface back.
+        AppletTerminate("out of focus past the grace period");
+      }
+    }
+
     svcSleepThread(16666667ULL);  // ~60 Hz
   }
   return nullptr;
