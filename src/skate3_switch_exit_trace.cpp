@@ -34,24 +34,32 @@ void __wrap_abort(void) {
   // rex::FatalError ends here, as do libstdc++ assertions and std::terminate's
   // default handler. Its message has already gone to stderr, which is redirected
   // to sdmc:/switch/skate3/stdio.log.
-  REX_BOOTLOG("EXIT: abort() -- see stdio.log for the message");
+  //
+  // Log the CALLER too. An abort with no message on stderr says almost nothing --
+  // and that is exactly what happened: something aborted silently and the only
+  // visible damage was an unrelated thread faulting as the image unmapped.
+  // Symbolicate with:
+  //   aarch64-none-elf-addr2line -f -C -e skate3.elf <caller - slide>
+  REX_BOOTLOG("EXIT: abort() from %p -- see stdio.log for any message",
+              __builtin_return_address(0));
   __real_abort();
 }
 
 void __wrap_exit(int status) {
-  REX_BOOTLOG("EXIT: exit(%d)", status);
+  REX_BOOTLOG("EXIT: exit(%d) from %p", status, __builtin_return_address(0));
   __real_exit(status);
 }
 
 void __wrap__exit(int status) {
-  REX_BOOTLOG("EXIT: _exit(%d)", status);
+  REX_BOOTLOG("EXIT: _exit(%d) from %p", status, __builtin_return_address(0));
   __real__exit(status);
 }
 
 void __wrap_diagAbortWithResult(Result res) {
   // libnx's own panic. This is what fires when a libnx API is misused -- the HID
   // abort that killed the intro video came through here.
-  REX_BOOTLOG("EXIT: diagAbortWithResult(0x%x) -- libnx panic", (unsigned)res);
+  REX_BOOTLOG("EXIT: diagAbortWithResult(0x%x) from %p -- libnx panic", (unsigned)res,
+              __builtin_return_address(0));
   __real_diagAbortWithResult(res);
 }
 
