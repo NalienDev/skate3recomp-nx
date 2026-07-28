@@ -26,7 +26,10 @@
 
 #include <pthread.h>
 
+#include <atomic>
 #include <cstddef>
+
+#include <rex/bootlog_switch.h>
 
 namespace {
 
@@ -69,7 +72,26 @@ int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
     }
   }
 
+  // Report what was actually asked for versus granted. SDL's threads route through
+  // here (verified in the disassembly) yet one still came out at 1 MiB, so the
+  // request evidently is not always honoured -- and a silently ignored stack size
+  // is exactly the failure this wrapper exists to prevent.
+  size_t effective = 0;
+  if (attr != nullptr) {
+    pthread_attr_getstacksize(attr, &effective);
+  }
+
   int rc = __real_pthread_create(thread, attr, start_routine, arg);
+
+  {
+    static std::atomic<uint32_t> c{0};
+    if (c.fetch_add(1, std::memory_order_relaxed) < 48) {
+      REX_BOOTLOG("thread: create rc=%d stack=%u KiB (raised=%d) entry=%p", rc,
+                  (unsigned)(effective / 1024), local_initialized ? 1 : 0,
+                  (void*)start_routine);
+    }
+  }
+
   if (local_initialized) {
     pthread_attr_destroy(&local);
   }
