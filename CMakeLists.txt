@@ -287,6 +287,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_native_scene_gpu.cpp
     src/skate3_native_scene_post.cpp
     src/skate3_screenshot.cpp
+    src/skate3_switch_exit_trace.cpp
     src/skate3_switch_thread_stacks.cpp
     src/skate3_shader_disasm.cpp
     src/skate3_title_update_installer.cpp
@@ -462,6 +463,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR SWITCH)
     # the only way to reach libstdc++'s own pthread_create calls.
     # See src/skate3_switch_thread_stacks.cpp.
     target_link_options(skate3 PRIVATE "-Wl,--wrap=pthread_create")
+
+    # Every exit announces itself first. Runs have ended with the app simply gone --
+    # log stops mid-frame, the crash report names a sleeping bystander, and nothing
+    # says which exit was taken. See src/skate3_switch_exit_trace.cpp.
+    target_link_options(skate3 PRIVATE
+        "-Wl,--wrap=abort" "-Wl,--wrap=exit" "-Wl,--wrap=_exit"
+        "-Wl,--wrap=diagAbortWithResult")
 
     if(SKATE3_NVK_LIBRARY AND EXISTS "${SKATE3_NVK_LIBRARY}")
         message(STATUS "Skate 3: linking NVK Vulkan driver: ${SKATE3_NVK_LIBRARY}")
