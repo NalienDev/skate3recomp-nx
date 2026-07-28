@@ -127,8 +127,14 @@ bool GuestTryCopy(void* dst, const void* src, size_t size) {
   if (size > kMaxGuestCopy) {
     static std::atomic<uint32_t> c{0};
     if (c.fetch_add(1, std::memory_order_relaxed) < 16) {
-      REXLOG_ERROR("GuestTryCopy: refusing implausible size {} bytes (dst={} src={})", size, dst,
-                   src);
+      // Log the caller. The refusal is correct -- a size this large means the
+      // guest-derived element count is garbage -- but WHICH call site is
+      // computing a garbage count is the actual question, and it is also the one
+      // whose glyph/texture reads are being dropped. Symbolicate with:
+      //   aarch64-none-elf-addr2line -f -C -e skate3.elf <caller - slide>
+      REXLOG_ERROR(
+          "GuestTryCopy: refusing implausible size {} bytes (dst={} src={} caller={})", size, dst,
+          src, __builtin_return_address(0));
     }
     return false;
   }
