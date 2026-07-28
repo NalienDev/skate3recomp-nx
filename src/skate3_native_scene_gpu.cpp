@@ -764,14 +764,16 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
   static thread_local std::vector<uint8_t> ib_scratch;
   if (vb_payload == nullptr) {
     vb_scratch.resize(item.vb_bytes);
-    if (!GuestTryCopy(vb_scratch.data(), base + item.vb_addr, item.vb_bytes)) {
+    if (!GuestTryCopyTo(vb_scratch.data(), vb_scratch.size(), base + item.vb_addr,
+                        item.vb_bytes)) {
       return false;
     }
     vb_payload = vb_scratch.data();
   }
   if (!item.cloth_quads && ib_payload == nullptr) {
     ib_scratch.resize(size_t(item.ib_count) * 2);
-    if (!GuestTryCopy(ib_scratch.data(), base + item.ib_addr, size_t(item.ib_count) * 2)) {
+    if (!GuestTryCopyTo(ib_scratch.data(), ib_scratch.size(), base + item.ib_addr,
+                        size_t(item.ib_count) * 2)) {
       return false;
     }
     ib_payload = ib_scratch.data();
@@ -1363,9 +1365,11 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
   }
   static thread_local std::vector<uint8_t> gen_scratch;
   gen_scratch.resize(size);
-  if (!GuestTryCopy(gen_scratch.data(), base + (0xA0000000u | addr), size)) {
+  if (!GuestTryCopyTo(gen_scratch.data(), gen_scratch.size(), base + (0xA0000000u | addr),
+                      size)) {
     if (min_size >= size ||
-        !GuestTryCopy(gen_scratch.data(), base + (0xA0000000u | addr), min_size)) {
+        !GuestTryCopyTo(gen_scratch.data(), gen_scratch.size(),
+                        base + (0xA0000000u | addr), min_size)) {
       return false;
     }
     size = min_size;
@@ -1743,11 +1747,13 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
   bool copy_truncated = false;
   for (uint32_t m = 0; m < mip_count; ++m) {
     MipSrc& s = srcs[m];
-    if (!GuestTryCopy(tex_scratch.data() + s.scratch_off,
-                      base + (0xA0000000u | s.addr), s.size)) {
+    if (!GuestTryCopyTo(tex_scratch.data() + s.scratch_off,
+                        tex_scratch.size() - s.scratch_off,
+                        base + (0xA0000000u | s.addr), s.size)) {
       if (s.min_size >= s.size ||
-          !GuestTryCopy(tex_scratch.data() + s.scratch_off,
-                        base + (0xA0000000u | s.addr), s.min_size)) {
+          !GuestTryCopyTo(tex_scratch.data() + s.scratch_off,
+                          tex_scratch.size() - s.scratch_off,
+                          base + (0xA0000000u | s.addr), s.min_size)) {
         break;
       }
       // Tiled fallback: the padded macro rows hold real blocks past
@@ -2104,9 +2110,11 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
   uint64_t fp = 0;
   for (int attempt = 0; attempt < 3; ++attempt) {
     const uint64_t fp_before = SampleProbeFingerprint(base, t);
-    if (!GuestTryCopy(inplace_scratch.data(), base + (0xA0000000u | addr), size)) {
+    if (!GuestTryCopyTo(inplace_scratch.data(), inplace_scratch.size(),
+                        base + (0xA0000000u | addr), size)) {
       if (min_size >= size ||
-          !GuestTryCopy(inplace_scratch.data(), base + (0xA0000000u | addr), min_size)) {
+          !GuestTryCopyTo(inplace_scratch.data(), inplace_scratch.size(),
+                          base + (0xA0000000u | addr), min_size)) {
         return false;  // payload unreadable: let the full path sort it out
       }
       size = min_size;

@@ -81,7 +81,7 @@ namespace {
 typedef void* (*GuestMemcpyFn)(void*, const void*, size_t);
 volatile GuestMemcpyFn g_guest_memcpy_fn = std::memcpy;
 }  // namespace
-__declspec(noinline) bool GuestTryCopy(void* dst, const void* src, size_t size) {
+__declspec(noinline) bool GuestTryCopyRaw(void* dst, const void* src, size_t size) {
   __try {
     g_guest_memcpy_fn(dst, src, size);
     return true;
@@ -102,7 +102,7 @@ __declspec(noinline) bool GuestTryCopy(void* dst, const void* src, size_t size) 
 // readable even after the streaming thread releases it. The guard is therefore
 // both inoperable and unnecessary; a plain copy is the correct behaviour.
 // (newlib additionally lacks sigjmp_buf / sigsetjmp / siglongjmp.)
-bool GuestTryCopy(void* dst, const void* src, size_t size) {
+bool GuestTryCopyRaw(void* dst, const void* src, size_t size) {
   // Every caller copies into a small fixed host buffer (largest today is
   // 96 rows * 16 floats = 6 KiB) with a guest-derived count. Horizon delivers no
   // CPU faults, so unlike the SEH/POSIX paths there is nothing here to catch a
@@ -110,34 +110,6 @@ bool GuestTryCopy(void* dst, const void* src, size_t size) {
   // stack, which is exactly the corruption signature being chased (a later `ret`
   // through a smashed x30 lands at the image base). Refuse implausible sizes and
   // say so rather than scribbling.
-  // DO NOT RAISE THIS. It was briefly taken to 16 MiB on the theory that the
-  // 921600-byte requests in the log were legitimate framebuffer copies (that is
-  // exactly 640x360x4). They are not: every caller of this function copies into a
-  // small FIXED host buffer -- &raw is 4 bytes, head/desc_head/vb_words are tens
-  // of bytes -- with a guest-derived element count. A 900 KiB copy into those is a
-  // host stack smash, and raising the cap produced exactly that: the next run
-  // ended with filesystem structures written over the tail of the log.
-  //
-  // So a size beyond this range means the guest-derived count is garbage, and
-  // refusing is the correct, intended behaviour. IsCommitted() below is a
-  // separate check (is the SOURCE mapped) and does not bound the destination.
-  // If a caller ever genuinely needs a large copy, give it its own path with an
-  // explicit destination capacity rather than widening this.
-  constexpr size_t kMaxGuestCopy = 64 * 1024;
-  if (size > kMaxGuestCopy) {
-    static std::atomic<uint32_t> c{0};
-    if (c.fetch_add(1, std::memory_order_relaxed) < 16) {
-      // Log the caller. The refusal is correct -- a size this large means the
-      // guest-derived element count is garbage -- but WHICH call site is
-      // computing a garbage count is the actual question, and it is also the one
-      // whose glyph/texture reads are being dropped. Symbolicate with:
-      //   aarch64-none-elf-addr2line -f -C -e skate3.elf <caller - slide>
-      REXLOG_ERROR(
-          "GuestTryCopy: refusing implausible size {} bytes (dst={} src={} caller={})", size, dst,
-          src, __builtin_return_address(0));
-    }
-    return false;
-  }
   // Horizon commits the guest window on demand, so a stale or bogus guest
   // pointer can land on a page that was never committed. There is no fault to
   // catch here, so the committed set has to be consulted before touching it --
@@ -194,7 +166,7 @@ void EnsureGuestCopyHandler() {
 }
 }  // namespace
 
-bool GuestTryCopy(void* dst, const void* src, size_t size) {
+bool GuestTryCopyRaw(void* dst, const void* src, size_t size) {
   EnsureGuestCopyHandler();
   if (sigsetjmp(tl_guest_copy_jmp, 0) != 0) {
     // Faulted mid-copy and jumped out of the signal handler: the signal is
@@ -316,6 +288,46 @@ uint64_t GuestReadRecoveryCount() {
   return g_read_recoveries.load(std::memory_order_relaxed);
 }
 #endif
+
+// Destination-aware guarded copy.
+//
+// There are two kinds of caller here and one global size limit could never serve
+// both. Most copy into a small FIXED host buffer (&raw is 4 bytes;
+// head/desc_head/vb_words are tens of bytes) with a guest-DERIVED element count,
+// so a large size means the count is garbage and must be refused -- letting a
+// 900 KiB memcpy into those smashed the host stack and corrupted the log tail.
+// But the texture and mesh decoders copy into heap scratch vectors they resize to
+// exactly the right size first, and refusing those is what left the game's fonts
+// unreadable and stopped it reaching the intro video.
+//
+// So the caller states its capacity. Then a large copy is allowed precisely when
+// the destination really is large, and the small-buffer callers keep a hard bound
+// through the GuestTryCopy() wrapper below.
+bool GuestTryCopyTo(void* dst, size_t dst_capacity, const void* src, size_t size) {
+  if (size > dst_capacity) {
+    static std::atomic<uint32_t> c{0};
+    if (c.fetch_add(1, std::memory_order_relaxed) < 16) {
+      REXLOG_ERROR(
+          "GuestTryCopy: refusing {} bytes into a {}-byte destination (dst={} src={} caller={})",
+          size, dst_capacity, dst, src,
+#if defined(_MSC_VER)
+          nullptr
+#else
+          __builtin_return_address(0)
+#endif
+      );
+    }
+    return false;
+  }
+  return GuestTryCopyRaw(dst, src, size);
+}
+
+// Legacy entry point: the destination is one of the small fixed buffers, so bound
+// it at a size no such buffer could ever legitimately need.
+bool GuestTryCopy(void* dst, const void* src, size_t size) {
+  constexpr size_t kMaxSmallGuestCopy = 64 * 1024;
+  return GuestTryCopyTo(dst, kMaxSmallGuestCopy, src, size);
+}
 
 float GuestHalfToFloat(uint16_t h) {
   const uint32_t sign = uint32_t(h & 0x8000u) << 16;

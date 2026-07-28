@@ -35,6 +35,12 @@ struct SkinSampleVert {
 // open-coded __try{memcpy}__except compiles to an UNPROTECTED `jmp memcpy`.
 bool GuestTryCopy(void* dst, const void* src, size_t size);
 
+// Same guarantees, but the caller states how big `dst` actually is. Use this
+// wherever the destination is a heap buffer sized for the copy (the texture and
+// mesh scratch vectors); GuestTryCopy above is for the small fixed buffers and
+// bounds them itself. See the comment at the definition.
+bool GuestTryCopyTo(void* dst, size_t dst_capacity, const void* src, size_t size);
+
 // Read-fault recovery for the renderer's RAW guest loads (the REX_LOAD-style
 // structure walks that do not route through GuestTryCopy). World streaming
 // can revoke a guest range between a pointer being captured and the renderer
