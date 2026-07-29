@@ -55,6 +55,7 @@ class Skate3PureApp : public Skate3BaseApp {
 #include <cstdio>
 
 #include <rex/bootlog_switch.h>
+#include <rex/memory/guest_memory_switch.h>
 #include <rex/switch_applet.h>
 
 // libnx runtime configuration, overriding the weak defaults in the executable
@@ -74,6 +75,12 @@ size_t __nx_heap_size = 0;
 // here. Without a sink those reports go nowhere, and a GPU fault is the one
 // thing worth knowing about.
 extern void (*g_drm_shim_err_sink)(const char*);
+
+// The NVK Switch WSI backend's diagnostic hook. That backend's output used to be
+// discarded entirely: it wrote through printf() to a stdout whose freopen fails
+// here, and through a weak dusk_switch_log() this binary never defined. Same
+// function-pointer mechanism as the drm_shim hook above, which does work.
+extern void (*g_wsi_switch_log_sink)(const char*);
 }
 
 // Applet lifecycle. Horizon expects an application to pump the applet message
@@ -111,11 +118,50 @@ bool g_applet_pump_started = false;
   __builtin_unreachable();
 }
 
+// Present heartbeat, bumped by VulkanPresenter after every vkQueuePresentKHR.
+extern "C" volatile uint64_t g_rex_present_heartbeat;
+
+// Present watchdog.
+//
+// The failure at character creation either kills the process or wedges the whole
+// console, and in the wedge case there is no afterwards: when the console goes,
+// the filesystem service goes with it, so nothing can be written and the last log
+// line always reads "everything fine". Every diagnostic so far has been
+// post-mortem from a dead process, which is why none of them said anything.
+//
+// This thread is the one that keeps running when the render and guest threads are
+// stuck. If presenting stops, it reports from INSIDE the hang -- while the
+// process is still alive and the SD card still works -- and then exits cleanly.
+// Exiting also means a wedge costs a return to hbmenu instead of a power-button
+// hold, which is the difference between a test cycle of seconds and one of
+// minutes.
+//
+// Generous threshold: a legitimate load screen can go seconds without presenting,
+// and a false positive would kill a healthy run. The hang is permanent, so any
+// threshold catches it.
+constexpr uint64_t kPresentStallNs = 10000000000ULL;  // 10 s
+
+void ReportPresentStall(uint64_t stalled_ns, uint64_t beats) {
+  // Summary FIRST and on its own line: REX_BOOTLOG opens/flushes/closes per call,
+  // so if a later line deadlocks against whatever is stuck, this one still landed.
+  REX_BOOTLOG("WATCHDOG: present stalled %llu ms after %llu presents -- dumping and exiting",
+              (unsigned long long)(stalled_ns / 1000000ULL), (unsigned long long)beats);
+  char line[192];
+  rex::memory::switch_backend::FormatHostMemory(line, sizeof(line), "present-stall");
+  REX_BOOTLOG("%s", line);
+  REX_BOOTLOG("WATCHDOG: focus=%d library_applet=%d", (int)appletGetFocusState(),
+              (int)rex::switch_applet::LibraryAppletOpen());
+}
+
 void* AppletPumpMain(void*) {
   // Time spent continuously out of focus before the process is taken down.
   constexpr uint64_t kFocusGraceNs = 2000000000ULL;  // 2 s
   uint64_t out_of_focus_since = 0;
   AppletFocusState last_state = AppletFocusState_InFocus;
+
+  uint64_t last_beat = 0;
+  uint64_t last_beat_tick = armGetSystemTick();
+  bool presenting_started = false;
 
   while (g_applet_pump_running.load(std::memory_order_relaxed)) {
     // An ExitRequested message is the clean path, but pressing HOME on an
@@ -149,6 +195,25 @@ void* AppletPumpMain(void*) {
         // power-button hold. Revisit if the renderer ever learns to idle on focus
         // loss and hand the surface back.
         AppletTerminate("out of focus past the grace period");
+      }
+    }
+
+    // Present watchdog. Only armed once presenting has actually begun, so the
+    // whole of boot -- which legitimately presents nothing for a long time --
+    // can never trip it.
+    {
+      const uint64_t beat = g_rex_present_heartbeat;
+      const uint64_t now = armGetSystemTick();
+      if (beat != last_beat) {
+        last_beat = beat;
+        last_beat_tick = now;
+        presenting_started = true;
+      } else if (presenting_started) {
+        const uint64_t stalled_ns = armTicksToNs(now - last_beat_tick);
+        if (stalled_ns >= kPresentStallNs) {
+          ReportPresentStall(stalled_ns, beat);
+          AppletTerminate("present watchdog: renderer stopped presenting");
+        }
       }
     }
 
@@ -219,6 +284,13 @@ struct SwitchInitHelper {
     // the display stack died with it -- that is the whole-console hang. It now
     // fails the submit (VK_ERROR_DEVICE_LOST) and reports through this hook.
     g_drm_shim_err_sink = [](const char* msg) { REX_BOOTLOG("%s", msg); };
+
+    // Same treatment for the WSI backend: swapchain create/teardown, zero-copy
+    // status, the nwindow buffer handover and the present-timing profiler. These
+    // land in boot.log, which opens/flushes/closes per line and therefore
+    // survives the abrupt death that leaves the run log truncated mid-stream.
+    g_wsi_switch_log_sink = [](const char* msg) { REX_BOOTLOG("%s", msg); };
+
 
     // NOTE: the NVK library is now packaged WITHOUT DRM_SHIM_DEBUG, so drm_shim
     // no longer traces every ioctl and no longer carries the pushbuf "peek" that

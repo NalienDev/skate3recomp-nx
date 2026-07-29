@@ -10,11 +10,12 @@ An unofficial **Nintendo Switch homebrew** port of the Xbox 360 version of Skate
 built by static recompilation. This repository is the Switch fork; the desktop
 (Windows/Linux/macOS) builds live upstream and are not maintained here.
 
-> **⚠️ This port is NOT playable yet**, but it does now render. It boots, loads
-> the game, and reaches the **language select screen** at roughly **9 fps** with
-> unreadable (blocky) text, then dies shortly after the Skate 3 logo. See
-> [Current status](#current-status). **Help is very welcome** — the whole
-> investigation is documented so anyone can pick it up.
+> **⚠️ This port is NOT playable yet, but it now reaches gameplay.** It boots,
+> loads, plays through the menus at ~30 fps, gets through character creation, and
+> enters the game — currently at about **4 fps**, with an intermittent GPU submit
+> failure that can still abort the process. See [Current status](#current-status).
+> **Help is very welcome** — the whole investigation is documented so anyone can
+> pick it up.
 
 The project does not include Skate 3 retail game files. To run or build it you
 must provide files from your own legally obtained Xbox 360 copy of Skate 3.
@@ -33,8 +34,12 @@ must provide files from your own legally obtained Xbox 360 copy of Skate 3.
   the physical membase) so any mirror address is valid the moment the page exists.
 - **The Xenos command processor runs**: the PM4 ring executes, draws submit,
   fences write back, and frames present continuously.
-- **It renders.** The game reaches the language select screen and keeps drawing.
-- **Kernel timers work** (this was the long-standing blocker — see below).
+- **It reaches gameplay.** Menus, character creation (including the team-logo and
+  team-name steps) and the transition into the game all work.
+- **Menus run at ~30 fps**, the rate the game itself targets.
+- **The software keyboard** works, and can be bypassed with
+  `switch_applet_keyboard = false` to reach character creation in seconds.
+- **Kernel timers work** (this was a long-standing blocker — see below).
 - **Controller input** via a native libnx HID driver, including rumble.
 - **HOME is safe.** An applet pump thread keeps Horizon's message queue serviced,
   so pressing HOME exits to hbmenu instead of wedging the console.
@@ -42,27 +47,44 @@ must provide files from your own legally obtained Xbox 360 copy of Skate 3.
 
 ### What does not work
 
-Current state, in the order you will hit it:
-
-1. **Text renders as solid blocks.** Font/glyph output is unreadable on the
-   language select screen. Not yet diagnosed. Note the `Direct resolve fallback
-   (cvar-disabled)` lines in the log are a red herring — that is the opt-in
-   `vulkan_direct_resolve_fast32` fast path being off, and the fallback route is
-   the correct one.
-2. **~9 fps** at the menu, at 640x360 with `draw_resolution_scale 1x1`. No
-   profiling done yet. `vulkan_direct_resolve_fast32` may help, but it is
-   described in-tree as a narrow prototype and may introduce artefacts.
-3. **Dies shortly after the Skate 3 logo** — screen goes black and the process
-   stops. Since the applet-pump fix the console itself survives and HOME works,
-   but the cause of the app dying here is unknown. **This is the next thing to
-   chase.** No Atmosphère crash report was produced for it, so it is likely a hang
-   or a clean-ish abort rather than a CPU fault.
-4. The language select screen advanced to the logo **without any input**, which
-   suggests the input or menu-timing path is not behaving.
+1. **~4 fps in gameplay.** Menus hold ~30 fps, but the game itself runs at about
+   4. This is the headline problem now. Measured per guest frame (`GUESTFRAME:`
+   in `boot.log`): 5 GPU submits/frame in menus rising to 9-24 in gameplay, with
+   45-78% of every frame spent blocked in the GPU submit path. **Reducing submits
+   per frame is the lead**, not tuning the submit throttle — four throttle shapes
+   have been measured and they only trade frame rate against stability.
+2. **Intermittent `0xd5c` GPU submit failure** (`LibnxNvidiaError_InsufficientMemory`)
+   which aborts the process. It is *not* exhaustion of anything the driver tracks
+   — measured at the failure: 91/4096 BOs, 2/64 channels, GPFIFO ring 2/2048 — so
+   it is inside the kernel's own per-submit accounting. Retrying cannot help:
+   `kickoff_retry` already waits up to 40 s. Prime suspect is a **double syncpoint
+   increment** (`nvGpuChannelIncrFence` *and* an appended fence cmdlist), which the
+   driver's own comments identify as the historical cause of `0xd5c`. The crash
+   point varies run to run on identical code, so "it crashed earlier" is not
+   evidence a change made things worse.
+3. **Text renders as solid blocks** on some screens. Not yet diagnosed. The
+   `Direct resolve fallback (cvar-disabled)` lines in the log are a red herring —
+   that is the opt-in `vulkan_direct_resolve_fast32` fast path being off, and the
+   fallback route is the correct one.
 
 ### Solved blockers worth knowing about
 
 These were each expensive to find; the details are in the git log.
+
+- **The character-creation wall — kernel resource exhaustion.** For a long time the
+  port died at character creation with a symptom that rotated between an app crash,
+  a livelock, a silent abort and a *whole-console* wedge. It was not graphics.
+  `svcMapProcessCodeMemory` was failing with `0xCE01` =
+  `KernelError_ResourceExhausted`: not host RAM (`mallinfo` showed ~1.5 GB of arena
+  headroom) but the process's **kernel system-resource pool**, fixed at process
+  creation, which every distinct mapping consumes for page-table and memory-block
+  metadata. It is invisible to `mallinfo` *and* to `svcGetInfo(UsedMemorySize)`,
+  which is why every memory probe came back clean. The guest backend was making
+  **785 of 870 commits a single 4 KiB page**. Rounding each commit out to the 2 MiB
+  block granule collapsed that to a handful of mappings: `CommitFresh` went from 870
+  calls to **1**, and the wall disappeared. **Cost: ~20 test cycles and five wrong
+  hypotheses** (swapchain overlap, image self-corruption, host OOM, the software
+  keyboard applet, GOT corruption) — each ruled out with evidence in the git log.
 
 - **Post-first-frame deadlock — absolute timer due times.** `NtSetTimerEx` with a
   *positive* `due_time` means an ABSOLUTE file time. Skate 3 computes its 60 Hz due
@@ -94,6 +116,17 @@ These were each expensive to find; the details are in the git log.
   instrumentation excluded timers (`objtype 13`) as "too noisy". That single
   exclusion hid the one thread that mattered for about ten build cycles. Untimed
   waits cannot flood a log — they block.
+- **A crash report can name a pure bystander.** Six different threads were named
+  across the wall investigation, every one of them *parked in a wait*, with the PC
+  reported as exactly the image base. They were being reported because the process
+  was already being torn down. Symbolicating them produced confident, wrong stories
+  for many cycles. (User exception handlers do not work under hbloader either — the
+  NPDM flag comes from the takeover title — so catching the first fault is not an
+  option here.)
+- **Measure the thing you are claiming.** `[wsi-prof]` reports *host presents*, and
+  the presenter repaints ~3x per guest frame, so it reads roughly 3x the real frame
+  rate. It was quoted as fps for several cycles before the discrepancy was caught.
+  `Vd: Swap` in the run log is the guest frame rate; cross-check against it.
 - **Suspect clock-conversion overflow early.** Three separate bugs here have been
   the same int64-nanosecond overflow (`kEffectivelyInfiniteWait`, the vblank
   deadline, the timer due time). `timer_queue.cpp` still passes
@@ -102,17 +135,23 @@ These were each expensive to find; the details are in the git log.
 
 ### Where to pick it up
 
-1. **Why the app dies after the logo** (item 3 above) — the open question. Grab
-   `logs/skate3_NNN.log` plus `boot.log` from the same run.
-2. **The blocky font.** Needs a run that reaches the language screen and a look at
-   how glyph textures are being uploaded/resolved.
-3. **Perf.** 9 fps at 640x360 has plenty of headroom to investigate;
-   `NtCreateEvent` alone costs a median **50 ms** on device because every
-   guest-object allocation hits the three-syscall commit path in
-   `guest_memory_switch.cpp`.
+1. **Gameplay performance (~4 fps).** The `GUESTFRAME:` line in `boot.log` gives
+   true frame rate, GPU submits per frame, and time blocked in the submit path.
+   The lead is **cutting submits per frame** (9-24 is far too many; batch in the
+   NVK queue path). Do not spend more cycles reshaping the submit throttle.
+2. **The intermittent `0xd5c` abort.** Check whether the hardware syncpoint runs
+   ahead of libnx's accounting (`syncpt hw=` / `expected=` / `delta=` on the
+   `kickoff 0xd5c` line). A growing delta confirms the double increment; then keep
+   exactly one increment. Note v22 removed the cmdlist and the fill submit hung
+   with the syncpoint stuck, so the two are not obviously interchangeable —
+   measure before flipping.
+3. **Lower the internal render resolution.** The game still looks close to 720p;
+   `draw_resolution_scale_x/y` and `video_mode_width/height` in `settings.toml`.
 4. **Remaining raw guest loads.** Only the viewport/scissor capture hooks are
    gated by `GuestReadable()`; the other structure walks in the native scene can
    still fault the same way. Mechanical to fix with the same helper.
+5. **`gen_flush_cmdlist` is generated into the channel cmdbuf and never submitted**
+   — dead code where libdrm_nouveau emits it between submits.
 
 ### Diagnostics built in
 
