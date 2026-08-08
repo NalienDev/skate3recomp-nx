@@ -469,7 +469,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR SWITCH)
     # says which exit was taken. See src/skate3_switch_exit_trace.cpp.
     target_link_options(skate3 PRIVATE
         "-Wl,--wrap=abort" "-Wl,--wrap=exit" "-Wl,--wrap=_exit"
-        "-Wl,--wrap=diagAbortWithResult")
+        "-Wl,--wrap=diagAbortWithResult" "-Wl,--wrap=svcExitProcess")
 
     if(SKATE3_NVK_LIBRARY AND EXISTS "${SKATE3_NVK_LIBRARY}")
         message(STATUS "Skate 3: linking NVK Vulkan driver: ${SKATE3_NVK_LIBRARY}")

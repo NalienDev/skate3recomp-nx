@@ -29,6 +29,7 @@ void __real_abort(void) __attribute__((noreturn));
 void __real_exit(int status) __attribute__((noreturn));
 void __real__exit(int status) __attribute__((noreturn));
 void __real_diagAbortWithResult(Result res) __attribute__((noreturn));
+void __real_svcExitProcess(void) __attribute__((noreturn));
 
 void __wrap_abort(void) {
   // rex::FatalError ends here, as do libstdc++ assertions and std::terminate's
@@ -61,6 +62,26 @@ void __wrap_diagAbortWithResult(Result res) {
   REX_BOOTLOG("EXIT: diagAbortWithResult(0x%x) from %p -- libnx panic", (unsigned)res,
               __builtin_return_address(0));
   __real_diagAbortWithResult(res);
+}
+
+void __wrap_svcExitProcess(void) {
+  // The last hole in this trace, and the one that fits the runs we cannot
+  // explain: several runs have ended with NO Atmosphere crash report, no EXIT
+  // line, no WATCHDOG line and no applet-terminate line, while the last logged
+  // frame looked perfectly healthy (29.6 fps). No report means no CPU fault, and
+  // Horizon still returned cleanly to hbmenu -- which is what svcExitProcess
+  // does. Every other way out already announces itself, so if something is
+  // calling this directly (libnx internals, or a path that never reaches
+  // exit()/abort()), this is the only thing that can name it.
+  //
+  // Our own applet pump calls this deliberately, but it logs
+  // "APPLET ...; terminating" first, so its line is already distinguishable.
+  //
+  // If a silent death produces NO line here either, the process is being killed
+  // from outside and no in-process instrumentation will ever catch it -- which is
+  // itself the answer, and would end that line of investigation.
+  REX_BOOTLOG("EXIT: svcExitProcess() from %p", __builtin_return_address(0));
+  __real_svcExitProcess();
 }
 
 }  // extern "C"
