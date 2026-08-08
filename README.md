@@ -258,7 +258,42 @@ setting. The settings overlay opens with the `menu_chord` binding (default
 
 ## Building
 
-devkitPro with devkitA64 and libnx is required.
+The build has **two stages**, and only the second is Switch-specific:
+
+1. **Recompile the game, on your host machine.** `rex::rexglue` (the recompiler
+   CLI in `third_party/rexglue-sdk`) reads *your* `default.xex` and emits C++ into
+   `generated/` — about 289 MB of it. That directory is gitignored and is never
+   distributed, which is why there is no prebuilt binary: it is derived from the
+   retail executable.
+2. **Cross-compile for Switch**, which consumes `generated/` and produces
+   `skate3.nro`.
+
+### Stage 1 - codegen (host)
+
+Point the build at your extracted dump and run the codegen target. The
+recompiler does not build for Switch, so this stage uses an ordinary host
+configure (any desktop generator):
+
+```sh
+cmake -B out/build/host -DSKATE3_GAME_DATA_ROOT=/path/to/your/skate3/dump
+cmake --build out/build/host --target generate-all
+```
+
+`SKATE3_GAME_DATA_ROOT` defaults to `game/` in the source tree and must contain
+`default.xex` and `data/webkit/EAWebkit.xex`. `SKATE3_TITLE_UPDATE_PACKAGE` can
+point at a TU3 STFS package; without it, codegen falls back to the retail XEX and
+the title-update-only sources are skipped.
+
+This step is slow and only has to be rerun when the game files change.
+
+### Stage 2 - the Switch build
+
+devkitPro with devkitA64 and libnx is required, plus a Switch build of **Mesa
+NVK** (`libvulkan.a`) — Horizon has no Vulkan loader, so the driver is linked
+statically. Building that yourself needs the `switch-nvk` tree and a Docker mesa
+build; the archive contains no game code and is published as a release asset, so
+you can drop it in instead. Point `SKATE3_NVK_ROOT`/`SKATE3_NVK_LIBRARY` at it
+(see `CMakePresets.json`).
 
 **The build must run inside devkitPro's own MSYS2 bash.** Mixing Git Bash with
 devkitPro's CMake fails with a `Cannot create temporary file in C:\Windows`
