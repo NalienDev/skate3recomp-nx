@@ -908,6 +908,22 @@ REXCVAR_DEFINE_INT32(
     "from async eligibility entirely.")
     .range(0, 1 << 24)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(skate3_native_render_scale, 1.0, "Skate 3",
+                      "Sub-native 3D render scale for the native scene renderer: the "
+                      "world and its postfx chain render at this fraction of the guest "
+                      "output on each axis, then a single bilinear pass upscales into "
+                      "the full-size output. The 2D/HUD layer is drawn AFTER that pass "
+                      "at full resolution, so text and HUD stay sharp while only the "
+                      "world softens. 1.0 = native (no intermediate is allocated and "
+                      "the chain targets the output directly, exactly as before). 0.75 "
+                      "renders 56% of the pixels, 0.66 renders 44%.\n"
+                      "This is the lever that matters on Switch, NOT draw_resolution_"
+                      "scale: that one drives the emulated Xenos/EDRAM path, which "
+                      "native_render_suppress_mode=2 already suppresses for the main "
+                      "scene while the native renderer is active. Ignored when MSAA is "
+                      "on (the MSAA resolve reads samples by integer coordinate).")
+    .range(0.5, 1.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(skate3_nvk_submit_batch, 8, "Skate 3",
                      "Switch/NVK only: how many GPU EXECs the winsys shim coalesces "
                      "into one kernel submit (nvGpuChannelKickoff). 1 reproduces the "

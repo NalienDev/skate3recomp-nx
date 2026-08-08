@@ -134,6 +134,7 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_revalidate);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_transparents);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_world_v2);
 REXCVAR_DECLARE(int32_t, skate3_nvk_submit_batch);
+REXCVAR_DECLARE(double, skate3_native_render_scale);
 REXCVAR_DECLARE(double, skate3_menu_blur_sigma);
 REXCVAR_DECLARE(double, skate3_native_render_scene_2d_sharp);
 REXCVAR_DECLARE(double, skate3_native_render_scene_bloom_intensity);
@@ -3614,8 +3615,7 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
   const uint32_t want_tile =
       tile_cfg > 0
           ? uint32_t(tile_cfg)
-          : std::min(512u * std::max(1u, (context.guest_output_height + 719u) /
-                                             720u),
+          : std::min(512u * std::max(1u, (g_r.render_height + 719u) / 720u),
                      4096u);
   if (g_r.shadow_raw != nullptr && g_r.shadow_tile != want_tile) {
     // Hot tile-size change: retire the atlas chain; recreated below. The
@@ -3890,8 +3890,8 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
   }
 
   if ((g_r.outline_mask == nullptr ||
-       g_r.outline_mask_width != context.guest_output_width ||
-       g_r.outline_mask_height != context.guest_output_height) &&
+       g_r.outline_mask_width != g_r.render_width ||
+       g_r.outline_mask_height != g_r.render_height) &&
       g_r.pso_outline_mask != nullptr && g_r.pso_outline_edge != nullptr) {
     // Selection-outline mask: single-sample R8 target at output resolution
     // (a 1152x640 mask left the contour centerline visibly stairstepped;
@@ -3902,8 +3902,8 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
       g_r.outline_mask = nullptr;
     }
     nrhi::TextureDesc desc;
-    desc.width = context.guest_output_width;
-    desc.height = context.guest_output_height;
+    desc.width = g_r.render_width;
+    desc.height = g_r.render_height;
     desc.format = nrhi::Format::kR8_UNORM;
     desc.usage = nrhi::kTextureUsageRenderTarget;
     desc.initial_state = nrhi::ResourceState::kRenderTarget;
@@ -3912,8 +3912,8 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
       REXLOG_ERROR("native-scene: outline mask creation failed; outline disabled");
       g_r.pso_outline_edge = nullptr;
     } else {
-      g_r.outline_mask_width = context.guest_output_width;
-      g_r.outline_mask_height = context.guest_output_height;
+      g_r.outline_mask_width = g_r.render_width;
+      g_r.outline_mask_height = g_r.render_height;
       // Re-point the mask view at the recreated texture.
       if (g_r.outline_mask_srv) {
         device->DestroyDeferred(g_r.outline_mask_srv);
@@ -4015,8 +4015,10 @@ bool EnsureFallbackTextures(const NativeGuestOutputRenderContext& context) {
 // Depth buffer + MSAA color target, rebuilt on output-size change.
 bool EnsureOutputSizedTargets(const NativeGuestOutputRenderContext& context) {
   nrhi::Device* device = context.device;
-  const uint32_t width = context.guest_output_width;
-  const uint32_t height = context.guest_output_height;
+  // 3D render size, not the output size: the scene depth and the MSAA/HDR color
+  // plane are part of the scaled chain (see skate3_native_render_scale).
+  const uint32_t width = g_r.render_width;
+  const uint32_t height = g_r.render_height;
   const nrhi::Format want_scene_fmt =
       g_r.hdr_active ? g_r.hdr_scene_format : nrhi::Format::kUnknown;
   if (!g_r.depth || g_r.depth_width != width || g_r.depth_height != height ||
@@ -4165,6 +4167,120 @@ bool EnsureOutputSizedTargets(const NativeGuestOutputRenderContext& context) {
   return true;
 }
 
+// Decide this frame's 3D render size (skate3_native_render_scale) and, when it
+// is below the output, make sure the intermediate the 3D chain renders into
+// exists. Must run BEFORE every output-sized allocation, which is why it sits
+// at the top of EnsurePipeline: depth, MSAA/HDR color, the postfx chain and the
+// outline mask all size themselves from g_r.render_width/height.
+//
+// Falls back to native (scale 1, no intermediate) whenever scaling cannot be
+// honoured, so no caller has to handle a half-applied scale.
+void UpdateRenderScale(const NativeGuestOutputRenderContext& context) {
+  const uint32_t out_w = std::max(1u, context.guest_output_width);
+  const uint32_t out_h = std::max(1u, context.guest_output_height);
+  const double want = std::clamp(REXCVAR_GET(skate3_native_render_scale), 0.5, 1.0);
+
+  uint32_t rw = out_w;
+  uint32_t rh = out_h;
+  // Two hard requirements, both checked HERE rather than at the upscale, because
+  // by the time the upscale runs the frame has already been rendered into the
+  // intermediate and there is no way back:
+  //  - MSAA off. The MSAA resolve reads samples by integer coordinate, so its
+  //    source and destination must be the same size. MSAA is forced to 1 on
+  //    Switch, which is the platform this exists for.
+  //  - The blit PSO exists. It is what gets the frame OUT of the intermediate;
+  //    without it the scene would render somewhere the output never sees, which
+  //    is a black screen with a fully working GPU -- the exact failure mode the
+  //    guest-output allocation produced when draw resolution scaling was left on.
+  //    EnsureBlurPsos nulls it and carries on when blur PSO creation fails, so
+  //    this is reachable.
+  const bool scaling = want < 0.999 && g_r.msaa <= 1 && g_r.pso_blur_blit != nullptr;
+  if (scaling) {
+    // Even dimensions: the postfx chain halves and quarters this size, and an
+    // odd width would make those intermediates disagree with their source by a
+    // texel and shift every downsampled tap.
+    rw = std::max(64u, uint32_t(std::lround(double(out_w) * want)) & ~1u);
+    rh = std::max(64u, uint32_t(std::lround(double(out_h) * want)) & ~1u);
+    rw = std::min(rw, out_w);
+    rh = std::min(rh, out_h);
+  }
+
+  g_r.render_width = rw;
+  g_r.render_height = rh;
+
+  const bool want_intermediate = rw != out_w || rh != out_h;
+  if (want_intermediate &&
+      (g_r.scaled_scene == nullptr || g_r.scaled_scene_width != rw ||
+       g_r.scaled_scene_height != rh ||
+       g_r.scaled_scene->format() != context.guest_output->format())) {
+    if (g_r.scaled_scene_srv != nullptr) {
+      context.device->DestroyDeferred(g_r.scaled_scene_srv);
+      g_r.scaled_scene_srv = nullptr;
+    }
+    if (g_r.scaled_scene != nullptr) {
+      context.device->DestroyDeferred(g_r.scaled_scene);
+      g_r.scaled_scene = nullptr;
+    }
+    nrhi::TextureDesc desc;
+    desc.width = rw;
+    desc.height = rh;
+    desc.format = context.guest_output->format();
+    desc.sample_count = 1;
+    // Sampling needs no usage bit here (a TextureView over it is enough), the
+    // same way menu_blur_tex is created render-target-only and then sampled.
+    desc.usage = nrhi::kTextureUsageRenderTarget;
+    // Steady state is kRenderTarget, standing in for the guest output's
+    // kGuestOutput: the 3D chain's barriers park their target in an idle state
+    // between passes, and a plain texture has no kGuestOutput to park in.
+    desc.initial_state = nrhi::ResourceState::kRenderTarget;
+    g_r.scaled_scene = context.device->CreateTexture(desc);
+    if (g_r.scaled_scene == nullptr) {
+      // Allocation failed: stay native rather than render into nothing. The
+      // guest-output allocation failing is exactly how draw resolution scaling
+      // produced a black screen with a fully working GPU on Switch.
+      REXLOG_ERROR("native-scene: render-scale target {}x{} alloc FAILED; staying native",
+                   rw, rh);
+      g_r.render_width = out_w;
+      g_r.render_height = out_h;
+      g_r.scaled_scene_width = 0;
+      g_r.scaled_scene_height = 0;
+      return;
+    }
+    nrhi::TextureViewDesc svd;
+    svd.mip_levels = 1;
+    g_r.scaled_scene_srv = context.device->CreateTextureView(g_r.scaled_scene, svd);
+    if (g_r.scaled_scene_srv == nullptr) {
+      // Without the view there is nothing to upscale FROM, and the 3D chain
+      // would render into a target that never reaches the output - a black
+      // screen with a fully working GPU. Stay native.
+      REXLOG_ERROR("native-scene: render-scale SRV creation FAILED; staying native");
+      context.device->DestroyDeferred(g_r.scaled_scene);
+      g_r.scaled_scene = nullptr;
+      g_r.render_width = out_w;
+      g_r.render_height = out_h;
+      g_r.scaled_scene_width = 0;
+      g_r.scaled_scene_height = 0;
+      return;
+    }
+    g_r.scaled_scene_width = rw;
+    g_r.scaled_scene_height = rh;
+    REXLOG_INFO("native-scene: 3D render scale {:.3f} -> {}x{} (output {}x{}, {}% of pixels)",
+                want, rw, rh, out_w, out_h,
+                uint32_t(std::lround(100.0 * double(rw) * double(rh) /
+                                     (double(out_w) * double(out_h)))));
+  } else if (!want_intermediate && g_r.scaled_scene != nullptr) {
+    if (g_r.scaled_scene_srv != nullptr) {
+      context.device->DestroyDeferred(g_r.scaled_scene_srv);
+      g_r.scaled_scene_srv = nullptr;
+    }
+    context.device->DestroyDeferred(g_r.scaled_scene);
+    g_r.scaled_scene = nullptr;
+    g_r.scaled_scene_width = 0;
+    g_r.scaled_scene_height = 0;
+    REXLOG_INFO("native-scene: 3D render scale back to native {}x{}", out_w, out_h);
+  }
+}
+
 bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
   if (g_r.failed) return false;
   nrhi::Device* device = context.device;
@@ -4240,6 +4356,10 @@ bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
   if (!EnsureHeapsAndRings(context) || !EnsureShadowResources(context)) {
     return false;
   }
+  // After the MSAA latch above (the scale is refused while MSAA is on) and
+  // before every output-sized allocation below, which all size themselves from
+  // g_r.render_width/height.
+  UpdateRenderScale(context);
   EnsureBlurOutlineTargets(context);
   if (!EnsureFallbackTextures(context) || !EnsureOutputSizedTargets(context)) {
     return false;
@@ -7933,12 +8053,25 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   const bool hdr_on = g_r.hdr_active && g_r.hdr_resolved != nullptr &&
                       g_r.hdr_srv != nullptr && g_r.pso_tonemap != nullptr;
   const bool msaa_on = g_r.msaa > 1 && g_r.msaa_color != nullptr && g_r.resolve_pso != nullptr;
+  // Where the 3D chain lands its finished frame. With a sub-native render scale
+  // that is the scaled intermediate, upscaled into the real guest output by a
+  // single pass once the chain is done (just before the photo grab / UI blur /
+  // 2D stages, so everything downstream of that point keeps working on the
+  // full-size output exactly as it did before). Without a scale it IS the guest
+  // output and nothing about this path changes.
+  //
+  // scene_target_idle is the state the chain parks its target in between
+  // passes: the guest output has kGuestOutput for that, a plain texture does
+  // not, so the intermediate uses its creation state instead.
+  nrhi::Texture* const scene_target =
+      g_r.scaled_scene != nullptr ? g_r.scaled_scene : context.guest_output;
+  const nrhi::ResourceState scene_target_idle = g_r.scaled_scene != nullptr
+                                                    ? nrhi::ResourceState::kRenderTarget
+                                                    : nrhi::ResourceState::kGuestOutput;
   nrhi::Texture* scene_color =
-      msaa_on ? g_r.msaa_color
-              : (hdr_on ? g_r.hdr_resolved : context.guest_output);
+      msaa_on ? g_r.msaa_color : (hdr_on ? g_r.hdr_resolved : scene_target);
   if (!msaa_on && !hdr_on) {
-    cmd->Barrier(context.guest_output, nrhi::ResourceState::kGuestOutput,
-                 nrhi::ResourceState::kRenderTarget);
+    cmd->Barrier(scene_target, scene_target_idle, nrhi::ResourceState::kRenderTarget);
     cmd->FlushBarriers();
   }
 
@@ -7970,15 +8103,20 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     cmd->SetRenderTargets(scene_color, nullptr);
   }
 
-  const nrhi::Viewport viewport{0.0f,
-                                0.0f,
-                                float(context.guest_output_width),
-                                float(context.guest_output_height),
-                                0.0f,
-                                1.0f};
+  // The 3D chain rasterizes at the render size (skate3_native_render_scale);
+  // one bilinear pass upscales into the full-size output before the 2D layer.
+  // NON-const deliberately: many later stages re-apply these, and at the upscale
+  // seam they are rebound to the output size so every one of those stages
+  // follows the target it is actually drawing into. See "THE SEAM" below.
+  nrhi::Viewport viewport{0.0f,
+                          0.0f,
+                          float(g_r.render_width),
+                          float(g_r.render_height),
+                          0.0f,
+                          1.0f};
   cmd->SetViewport(viewport);
-  const nrhi::Rect scissor{0, 0, int32_t(context.guest_output_width),
-                           int32_t(context.guest_output_height)};
+  nrhi::Rect scissor{0, 0, int32_t(g_r.render_width),
+                     int32_t(g_r.render_height)};
   cmd->SetScissor(scissor);
   cmd->SetBindingLayout(g_r.layout);
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
@@ -9296,7 +9434,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // - the authored garment folds read weaker than the emulated
       // reference without this.
       constants[49] =
-          log2f(std::max(1.0f, float(context.guest_output_height) / 640.0f));
+          log2f(std::max(1.0f, float(g_r.render_height) / 640.0f));
     }
     // Exact flowingwateralpha branch (cam_pos.w = -30): the canal/waterfall
     // shader hand-ported from the game's own PS and verified per-pixel
@@ -9373,7 +9511,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // fog comes from the shared b1 rows; misc.zw stay free. misc.x keeps
       // the water marker for the SSR G-buffer restage.
       constants[49] =
-          log2f(std::max(1.0f, float(context.guest_output_height) / 640.0f));
+          log2f(std::max(1.0f, float(g_r.render_height) / 640.0f));
       constants[50] = 0.0f;
       constants[51] = 0.0f;
     } else if (item.transparent || item.water) {
@@ -9409,7 +9547,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // refl_mode cvar; both spare on opaque items; the fog packing only
       // uses these slots on transparent/water).
       constants[49] =
-          log2f(std::max(1.0f, float(context.guest_output_height) / 640.0f));
+          log2f(std::max(1.0f, float(g_r.render_height) / 640.0f));
       constants[50] = float(REXCVAR_GET(skate3_native_render_scene_refl_mode));
       constants[51] = float(REXCVAR_GET(skate3_native_render_scene_refl_lod));
       // misc.x (spare on opaque fam 5/6): both constant normal-tilt trims,
@@ -10515,12 +10653,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     cmd->Barrier(g_r.msaa_color, nrhi::ResourceState::kRenderTarget,
                  nrhi::ResourceState::kPixelShaderResource);
     if (!hdr_on) {
-      cmd->Barrier(context.guest_output, nrhi::ResourceState::kGuestOutput,
-                   nrhi::ResourceState::kRenderTarget);
+      cmd->Barrier(scene_target, scene_target_idle, nrhi::ResourceState::kRenderTarget);
     }
     cmd->FlushBarriers();
-    cmd->SetRenderTargets(hdr_on ? g_r.hdr_resolved : context.guest_output,
-                          nullptr);
+    cmd->SetRenderTargets(hdr_on ? g_r.hdr_resolved : scene_target, nullptr);
     cmd->SetPipeline(g_r.resolve_pso);
     cmd->SetTexture(1, g_r.msaa_srv_slot);
     cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
@@ -10533,8 +10669,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // output. Under HDR it runs after the tonemap below (a gamma-space
   // screen overlay, not scene lighting).
   if (outline_ready && !hdr_on) {
-    RenderOutlineComposite(context, scene, context.guest_output, viewport,
-                           scissor);
+    RenderOutlineComposite(context, scene, scene_target, viewport, scissor);
   }
 
   // ---- Screen-space ambient occlusion (ssao.hlsl: GTAO) ----
@@ -10605,8 +10740,62 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   }
 
   if (outline_ready && hdr_on) {
-    RenderOutlineComposite(context, scene, context.guest_output, viewport,
-                           scissor);
+    RenderOutlineComposite(context, scene, scene_target, viewport, scissor);
+  }
+
+  // ---- Sub-native render scale: upscale the 3D frame into the output ----
+  //
+  // THE SEAM. Everything above rasterized at g_r.render_width/height into the
+  // scaled intermediate; everything below - the photo-editor postfx chain, the
+  // photo grab, the popup/menu blur and the 2D/HUD layer - works on the
+  // full-size guest output, exactly as it did before this existed. Placing the
+  // upscale here is what keeps that true: those stages are screen-space effects
+  // over the finished frame, and the 2D layer in particular MUST stay at native
+  // resolution or the text goes soft, which is the whole point of scaling only
+  // the world.
+  //
+  // ps_blit is a plain bilinear fullscreen resample (src.SampleLevel over a
+  // [0,1] UV triangle), so it upscales by construction - no shader work needed.
+  if (g_r.scaled_scene != nullptr && g_r.pso_blur_blit != nullptr &&
+      g_r.scaled_scene_srv != nullptr) {
+    cmd->Barrier(g_r.scaled_scene, nrhi::ResourceState::kRenderTarget,
+                 nrhi::ResourceState::kPixelShaderResource);
+    cmd->Barrier(context.guest_output, nrhi::ResourceState::kGuestOutput,
+                 nrhi::ResourceState::kRenderTarget);
+    cmd->FlushBarriers();
+    const nrhi::Viewport out_vp{0.0f,
+                                0.0f,
+                                float(context.guest_output_width),
+                                float(context.guest_output_height),
+                                0.0f,
+                                1.0f};
+    const nrhi::Rect out_sc{0, 0, int32_t(context.guest_output_width),
+                            int32_t(context.guest_output_height)};
+    cmd->SetRenderTargets(context.guest_output, nullptr);
+    cmd->SetViewport(out_vp);
+    cmd->SetScissor(out_sc);
+    // From here on the frame is full-size. Rebinding the locals makes every
+    // later `SetViewport(viewport)` follow the output rather than re-applying
+    // the scaled 3D rect to a full-size target.
+    viewport = out_vp;
+    scissor = out_sc;
+    cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+    cmd->SetPipeline(g_r.pso_blur_blit);
+    cmd->SetTexture(1, g_r.scaled_scene_srv);
+    cmd->Draw(3, 0);
+    cmd->Barrier(g_r.scaled_scene, nrhi::ResourceState::kPixelShaderResource,
+                 nrhi::ResourceState::kRenderTarget);
+    cmd->FlushBarriers();
+    // The stages below latch the main-pass bindings and the FULL-SIZE viewport;
+    // the scaled `viewport`/`scissor` locals must not leak past this point.
+    cmd->SetBindingLayout(g_r.layout);
+    if (g_r.shadow_cb != nullptr) {
+      const uint32_t cb_offset =
+          uint32_t(frame_number % RendererState::kShadowCbRegions) *
+          RendererState::kShadowCbSlice;
+      cmd->SetConstantBuffer(6, g_r.shadow_cb, cb_offset);
+      cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
+    }
   }
 
   // ---- Photo-editor postfx chain (photo_fx.hlsl: exact ucode ports) ----
@@ -10796,8 +10985,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
             }
           }
         }
-        rows[248 * 4 + 0] = float(context.guest_output_width);
-        rows[248 * 4 + 1] = float(context.guest_output_height);
+        rows[248 * 4 + 0] = float(g_r.render_width);
+        rows[248 * 4 + 1] = float(g_r.render_height);
         rows[249 * 4 + 0] = float(pfx_debug);
         return uint64_t(slot) * 4096;
       };

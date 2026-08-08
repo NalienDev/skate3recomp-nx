@@ -492,6 +492,29 @@ struct RendererState {
   nrhi::Texture* depth = nullptr;
   uint32_t depth_width = 0;
   uint32_t depth_height = 0;
+  // Sub-native 3D rendering (skate3_native_render_scale).
+  //
+  // The 3D scene and its postfx chain render at render_width x render_height;
+  // the 2D/HUD layer is drawn afterwards straight into the full-size guest
+  // output, so the world softens but text and HUD stay sharp. When the scale is
+  // 1 these equal the guest output size and scaled_scene stays null, which is
+  // byte-for-byte the old behaviour - the intermediate only exists when it is
+  // actually smaller than the output.
+  //
+  // Worth knowing why this is here and not in draw_resolution_scale: that knob
+  // drives the EMULATED (Xenos PM4 -> EDRAM -> resolve) path, and
+  // native_render_suppress_mode=2 suppresses the guest's whole main scene +
+  // postfx band while the native renderer is active. Scaling it would change
+  // only menus and loading, which already sit at the game's 30 fps cap.
+  uint32_t render_width = 0;
+  uint32_t render_height = 0;
+  // The 3D chain's render target while scaling is active (else null and the
+  // chain targets the guest output directly, as before). Upscaled into the
+  // guest output by a single ps_blit pass just before the 2D layer.
+  nrhi::Texture* scaled_scene = nullptr;
+  nrhi::TextureView* scaled_scene_srv = nullptr;
+  uint32_t scaled_scene_width = 0;
+  uint32_t scaled_scene_height = 0;
   // Cached guest-output texture identity (context.guest_output) for change
   // detection: the presenter recreates the output image on resize.
   nrhi::Texture* rtv_resource = nullptr;
@@ -1013,6 +1036,35 @@ struct RendererState {
 };
 
 inline RendererState g_r;
+
+// ---- Sub-native 3D render scale (skate3_native_render_scale) ----------------
+//
+// The 3D chain -- scene, SSAO, SSR, volumetrics, bloom/tonemap, outline -- runs
+// against these rather than against context.guest_output directly, so that a
+// scale substitutes the smaller intermediate for the whole chain at once. One
+// bilinear pass upscales into the real output at the seam in RenderScene, after
+// which the photo chain, the popup/menu blur and the 2D/HUD layer use the guest
+// output as they always did. With no scale in force these are the guest output
+// and its own state, i.e. exactly the previous behaviour.
+
+// The plane the 3D chain renders into.
+inline nrhi::Texture* SceneTarget(const NativeGuestOutputRenderContext& context) {
+  return g_r.scaled_scene != nullptr ? g_r.scaled_scene : context.guest_output;
+}
+
+// A sampled view of that plane, for the passes that read the scene back
+// (SSAO luma, SSR, tonemap input on the classic path).
+inline nrhi::TextureView* SceneTargetSrv() {
+  return g_r.scaled_scene != nullptr ? g_r.scaled_scene_srv : g_r.output_srv_slot;
+}
+
+// The state the chain parks that plane in between passes. The guest output has
+// kGuestOutput for this; a plain intermediate has no such state and uses the
+// render-target state it was created in.
+inline nrhi::ResourceState SceneTargetIdle() {
+  return g_r.scaled_scene != nullptr ? nrhi::ResourceState::kRenderTarget
+                                     : nrhi::ResourceState::kGuestOutput;
+}
 
 constexpr nrhi::InputElementDesc kSceneInputLayout[7] = {
     {"POSITION", 0, 0, nrhi::Format::kR32G32B32_FLOAT, 0},

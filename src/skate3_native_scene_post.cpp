@@ -241,16 +241,15 @@ bool ApplySsaoPass(const NativeGuestOutputRenderContext& context,
   // the same plane (HDR: the float scene plane pre-tonemap, classic: the
   // guest output).
   const bool hdr = g_r.hdr_active && g_r.hdr_resolved != nullptr;
-  nrhi::Texture* const scene_plane =
-      hdr ? g_r.hdr_resolved : context.guest_output;
-  nrhi::TextureView* const scene_srv =
-      hdr ? g_r.hdr_srv : g_r.output_srv_slot;
+  nrhi::Texture* const scene_plane = hdr ? g_r.hdr_resolved : SceneTarget(context);
+  nrhi::TextureView* const scene_srv = hdr ? g_r.hdr_srv : SceneTargetSrv();
   if (scene_srv == nullptr) {
     return false;
   }
   nrhi::Device* device = context.device;
-  const uint32_t width = context.guest_output_width;
-  const uint32_t height = context.guest_output_height;
+  // 3D chain: rasters at the render size (skate3_native_render_scale).
+  const uint32_t width = g_r.render_width;
+  const uint32_t height = g_r.render_height;
   // AO raster: half the output resolution by default: for a low-frequency
   // term the depth-aware blur + bilinear upsample hide it, at 1/4 the march
   // cost (full-res GTAO at 4K x 300+ uncapped fps pegged the GPU). The
@@ -715,8 +714,8 @@ bool EnsureSsrPipeline(const NativeGuestOutputRenderContext& context) {
 // Half-res SSR intermediates (reflection G-buffer + march output), steady
 // state RENDER_TARGET, rebuilt on resize.
 bool EnsureSsrTargets(const NativeGuestOutputRenderContext& context) {
-  const uint32_t sw = std::max(1u, (context.guest_output_width + 1) / 2);
-  const uint32_t sh = std::max(1u, (context.guest_output_height + 1) / 2);
+  const uint32_t sw = std::max(1u, (g_r.render_width + 1) / 2);
+  const uint32_t sh = std::max(1u, (g_r.render_height + 1) / 2);
   if (g_r.ssr_width == sw && g_r.ssr_height == sh && g_r.ssr_gbuf != nullptr &&
       g_r.ssr_tex != nullptr) {
     return true;
@@ -793,8 +792,9 @@ bool ApplySsrPass(const NativeGuestOutputRenderContext& context,
   // back in its RENDER_TARGET steady state.
   g_r.ssr_gbuf_ready = false;
   nrhi::Device* device = context.device;
-  const uint32_t width = context.guest_output_width;
-  const uint32_t height = context.guest_output_height;
+  // 3D chain: rasters at the render size (skate3_native_render_scale).
+  const uint32_t width = g_r.render_width;
+  const uint32_t height = g_r.render_height;
   const auto bail = [&] {
     cmd->Barrier(g_r.ssr_gbuf, nrhi::ResourceState::kPixelShaderResource,
                  nrhi::ResourceState::kRenderTarget);
@@ -1134,8 +1134,9 @@ bool ApplyVolumetricPass(const NativeGuestOutputRenderContext& context,
     return false;
   }
   nrhi::Device* device = context.device;
-  const uint32_t width = context.guest_output_width;
-  const uint32_t height = context.guest_output_height;
+  // 3D chain: rasters at the render size (skate3_native_render_scale).
+  const uint32_t width = g_r.render_width;
+  const uint32_t height = g_r.render_height;
 
   // ---- Full-res linear view-Z: the SSAO plane when AO linearized this
   // frame (it idles back in RENDER_TARGET after the AO pass), else the own
@@ -1568,8 +1569,9 @@ void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
                   const nrhi::Rect& scissor, bool loading_native,
                   uint64_t frame_number) {
   nrhi::Device* device = context.device;
-  const uint32_t width = context.guest_output_width;
-  const uint32_t height = context.guest_output_height;
+  // 3D chain: rasters at the render size (skate3_native_render_scale).
+  const uint32_t width = g_r.render_width;
+  const uint32_t height = g_r.render_height;
   // Bloom chain intermediates: QUARTER res halving down to the level cap or
   // an 8-px floor, RGBA16F, steady state RENDER_TARGET. Quarter start =
   // 1/4 the pyramid cost of a half-res chain; the extraction pass widens
@@ -1726,7 +1728,7 @@ void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
 
   // Tonemap into the guest output (the single application of the game's
   // shared tone chain; bloom energy joins pre-tonemap).
-  cmd->Barrier(context.guest_output, nrhi::ResourceState::kGuestOutput,
+  cmd->Barrier(SceneTarget(context), SceneTargetIdle(),
                nrhi::ResourceState::kRenderTarget);
   cmd->FlushBarriers();
   set_consts(width, height, width, height,
@@ -1736,7 +1738,7 @@ void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
              1.0f);
   cmd->SetViewport(viewport);
   cmd->SetScissor(scissor);
-  cmd->SetRenderTargets(context.guest_output, nullptr);
+  cmd->SetRenderTargets(SceneTarget(context), nullptr);
   cmd->SetPipeline(g_r.pso_tonemap);
   cmd->SetTexture(1, g_r.hdr_srv);
   cmd->SetTexture(2, bloom ? g_r.bloom_srv[0] : g_r.white.srv);
