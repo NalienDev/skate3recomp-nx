@@ -394,6 +394,21 @@ void Install() {
     switch_default("skate3_native_render_scene_msaa", "1");
     switch_default("skate3_native_render_scene_hdr", "false");
     switch_default("skate3_native_render_scene_shadow_static_size", "1024");
+    // Block on the GPU every 32nd kernel submit. This is what keeps 0xd5c away:
+    // that failure tracks whether the CPU ever BLOCKS, not how often it submits,
+    // so a GPU that keeps up stops nvgpu retiring finished jobs. Swept on
+    // hardware -- 4/16/32/64 gave 4.7/5.2/5.9/5.0 fps, and 64 also brought the
+    // failures back, so 32 is both the fastest and the safe side of the edge.
+    switch_default("skate3_nvk_sync_submit", "32");
+    // SSAO ON, for the occlusion cull rather than for the ambient occlusion:
+    // the cull's depth grid is produced by the SSAO pass's reduce, so with AO
+    // off the grid never refreshes, the cull never engages, and every static
+    // item pays full per-item CPU whether or not it is visible. Measured with
+    // it on: draws/frame 842 -> 465, per-draw 91us -> 43-69us, items 40ms ->
+    // 22-34ms, and submit-wait UNCHANGED at ~107ms -- the AO pass pays for
+    // itself. (Decoupling the grid from SSAO would be tidier and is why the
+    // dependency is written down here, but on these numbers it buys nothing.)
+    switch_default("skate3_native_render_scene_ssao", "true");
     // Report what is ACTUALLY in force, not what this wanted to set. The old
     // line printed the requested values as though they were the outcome, which
     // is precisely what hid the clobbering for so long -- it agreed with itself
@@ -404,6 +419,10 @@ void Install() {
         rex::cvar::Query<int32_t>("skate3_native_render_scene_msaa"),
         rex::cvar::Query<bool>("skate3_native_render_scene_hdr") ? "HDR" : "no HDR",
         rex::cvar::Query<int32_t>("skate3_native_render_scene_shadow_static_size"));
+    REXLOG_INFO("native-render: Switch perf profile (drain every {}, SSAO {}, 3D scale {:.2f})",
+                rex::cvar::Query<int32_t>("skate3_nvk_sync_submit"),
+                rex::cvar::Query<bool>("skate3_native_render_scene_ssao") ? "on (occlusion grid)" : "off",
+                rex::cvar::Query<double>("skate3_native_render_scale"));
 #endif
   }
   skate3::native_scene::Install();
