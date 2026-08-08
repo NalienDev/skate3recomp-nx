@@ -65,6 +65,8 @@
 // extern "C" at file scope: a block-scope extern inside a namespace would
 // declare a C++-mangled symbol that does not exist in libvulkan.a.
 extern "C" int g_drm_shim_batch_max;
+// Drain period: block on the GPU after every Nth submit. See the cvar.
+extern "C" int g_drm_shim_sync_submit;
 #endif
 
 // Cvars defined in skate3_native_scene.cpp (and SDK cvars re-declared there).
@@ -134,6 +136,7 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_revalidate);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_transparents);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_world_v2);
 REXCVAR_DECLARE(int32_t, skate3_nvk_submit_batch);
+REXCVAR_DECLARE(int32_t, skate3_nvk_sync_submit);
 REXCVAR_DECLARE(double, skate3_native_render_scale);
 REXCVAR_DECLARE(double, skate3_menu_blur_sigma);
 REXCVAR_DECLARE(double, skate3_native_render_scene_2d_sharp);
@@ -7712,6 +7715,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // A/B control for submit batching and the alternative to exercising it is a
   // full NVK archive rebuild per data point.
   g_drm_shim_batch_max = std::clamp(REXCVAR_GET(skate3_nvk_submit_batch), 1, 32);
+  g_drm_shim_sync_submit = std::clamp(REXCVAR_GET(skate3_nvk_sync_submit), 0, 64);
 #endif
   // While the game reports menus / loading (presence context 0x8001 == 0),
   // yield to the emulated output, EXCEPT the in-game pause menu (world

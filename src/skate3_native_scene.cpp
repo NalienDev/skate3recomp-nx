@@ -924,7 +924,21 @@ REXCVAR_DEFINE_DOUBLE(skate3_native_render_scale, 1.0, "Skate 3",
                       "on (the MSAA resolve reads samples by integer coordinate).")
     .range(0.5, 1.0)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
-REXCVAR_DEFINE_INT32(skate3_nvk_submit_batch, 8, "Skate 3",
+REXCVAR_DEFINE_INT32(skate3_nvk_sync_submit, 0, "Skate 3",
+                     "Switch/NVK only: block on the GPU after every Nth kernel submit "
+                     "(0 = never, 1 = every submit, 4 = every 4th). This is the 0xd5c "
+                     "dial. That failure fires when frames are CHEAP and not when they "
+                     "are expensive at an identical submit rate, so the variable is not "
+                     "how often we submit but whether the CPU ever BLOCKS -- an "
+                     "expensive frame blocks 15-200ms in nvFenceWait, a cheap one "
+                     "0.4ms. If nvgpu retires finished jobs on the back of blocking "
+                     "syncpoint waits, a GPU that keeps up never reaps and the "
+                     "per-submit allocation eventually fails. Raising this reintroduces "
+                     "blocking waits; every submit fully serialises CPU and GPU, every "
+                     "4th or 8th costs a fraction of that.")
+    .range(0, 64)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(skate3_nvk_submit_batch, 1, "Skate 3",
                      "Switch/NVK only: how many GPU EXECs the winsys shim coalesces "
                      "into one kernel submit (nvGpuChannelKickoff). 1 reproduces the "
                      "old one-submit-per-EXEC behaviour exactly. The kernel error "
@@ -933,7 +947,8 @@ REXCVAR_DEFINE_INT32(skate3_nvk_submit_batch, 8, "Skate 3",
                      "frequent -- so this is the knob that decides stability under "
                      "load, and it is exposed here so it can be A/B'd on device "
                      "without rebuilding the NVK archive. Applied per frame by the "
-                     "native scene renderer.")
+                     "native scene renderer. DEFAULT 1 (off): batching measurably "
+                     "destabilises this port on hardware.")
     .range(1, 32)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_DOUBLE(skate3_native_render_scene_2d_sharp, 0.0, "Skate 3",
