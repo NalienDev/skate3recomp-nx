@@ -10,12 +10,14 @@ An unofficial **Nintendo Switch homebrew** port of the Xbox 360 version of Skate
 built by static recompilation. This repository is the Switch fork; the desktop
 (Windows/Linux/macOS) builds live upstream and are not maintained here.
 
-> **⚠️ This port is NOT playable yet, but it now reaches gameplay.** It boots,
-> loads, plays through the menus at ~30 fps, gets through character creation, and
-> enters the game — currently at about **4 fps**, with an intermittent GPU submit
-> failure that can still abort the process. See [Current status](#current-status).
-> **Help is very welcome** — the whole investigation is documented so anyone can
-> pick it up.
+> **⚠️ This port is playable-ish, but not yet good.** It boots, loads, plays
+> through the menus at ~30 fps, gets through character creation, and enters the
+> game at about **6 fps**. The `0xd5c` GPU submit failure that used to abort runs
+> is understood and mitigated (zero failures across a session), but **an
+> unexplained crash before the main menu still kills many launches** — expect to
+> relaunch several times to get into gameplay. See
+> [Current status](#current-status). **Help is very welcome** — the whole
+> investigation is documented so anyone can pick it up.
 
 The project does not include Skate 3 retail game files. To run or build it you
 must provide files from your own legally obtained Xbox 360 copy of Skate 3.
@@ -47,22 +49,25 @@ must provide files from your own legally obtained Xbox 360 copy of Skate 3.
 
 ### What does not work
 
-1. **~4 fps in gameplay.** Menus hold ~30 fps, but the game itself runs at about
-   4. This is the headline problem now. Measured per guest frame (`GUESTFRAME:`
-   in `boot.log`): 5 GPU submits/frame in menus rising to 9-24 in gameplay, with
-   45-78% of every frame spent blocked in the GPU submit path. **Reducing submits
-   per frame is the lead**, not tuning the submit throttle — four throttle shapes
-   have been measured and they only trade frame rate against stability.
-2. **Intermittent `0xd5c` GPU submit failure** (`LibnxNvidiaError_InsufficientMemory`)
-   which aborts the process. It is *not* exhaustion of anything the driver tracks
-   — measured at the failure: 91/4096 BOs, 2/64 channels, GPFIFO ring 2/2048 — so
-   it is inside the kernel's own per-submit accounting. Retrying cannot help:
-   `kickoff_retry` already waits up to 40 s. Prime suspect is a **double syncpoint
-   increment** (`nvGpuChannelIncrFence` *and* an appended fence cmdlist), which the
-   driver's own comments identify as the historical cause of `0xd5c`. The crash
-   point varies run to run on identical code, so "it crashed earlier" is not
-   evidence a change made things worse.
-3. **Text renders as solid blocks** on some screens. Not yet diagnosed. The
+1. **A crash before the main menu kills many launches.** The single biggest
+   problem for anyone trying to play it: expect to relaunch several times.
+   The log stops mid-stream with the ISR still alive, no crash report and no exit
+   breadcrumb, and failing runs log **zero** `0xd5c` — so it is *not* the submit
+   failure below. Every in-process exit route is instrumented and none is taken.
+   The applet pump's 2-second out-of-focus self-terminate was ruled out (no focus
+   transitions are ever logged). It is unexplained, it looks external, and it is
+   the top open bug.
+2. **~6 fps in gameplay.** Menus hold ~30 fps. Of a ~170 ms gameplay frame,
+   ~107 ms is GPU and ~60 ms is the scene builder. The GPU side is now dominated
+   by real per-pixel execution, and the CPU side by per-draw texture and constant
+   setup (~20-33 µs and ~17-30 µs across ~465 draws) — that is code-level work,
+   not a settings knob.
+3. **The UI is stretched** on the narrow 960x720 guest frontbuffer. Three
+   corrections were tried and reverted; the 2D stream turns out to be MIXED (some
+   draws build their ortho from the 960 buffer with geometry authored for 1280,
+   others are already self-consistent), so no single layer-wide transform works.
+   It needs a per-draw decision from each draw's own ortho width. Cosmetic.
+4. **Text renders as solid blocks** on some screens. Not yet diagnosed. The
    `Direct resolve fallback (cvar-disabled)` lines in the log are a red herring —
    that is the opt-in `vulkan_direct_resolve_fast32` fast path being off, and the
    fallback route is the correct one.
@@ -135,19 +140,21 @@ These were each expensive to find; the details are in the git log.
 
 ### Where to pick it up
 
-1. **Gameplay performance (~4 fps).** The `GUESTFRAME:` line in `boot.log` gives
-   true frame rate, GPU submits per frame, and time blocked in the submit path.
-   The lead is **cutting submits per frame** (9-24 is far too many; batch in the
-   NVK queue path). Do not spend more cycles reshaping the submit throttle.
-2. **The intermittent `0xd5c` abort.** Check whether the hardware syncpoint runs
-   ahead of libnx's accounting (`syncpt hw=` / `expected=` / `delta=` on the
-   `kickoff 0xd5c` line). A growing delta confirms the double increment; then keep
-   exactly one increment. Note v22 removed the cmdlist and the fill submit hung
-   with the syncpoint stuck, so the two are not obviously interchangeable —
-   measure before flipping.
-3. **Lower the internal render resolution.** The game still looks close to 720p;
-   `draw_resolution_scale_x/y` and `video_mode_width/height` in `settings.toml`.
-4. **Remaining raw guest loads.** Only the viewport/scissor capture hooks are
+1. **The pre-menu crash.** The top bug, and orthogonal to everything else — every
+   performance gain below holds regardless of when it is found. Log-reading has
+   been exhausted; the port reached gameplay reliably at an earlier commit, so
+   **bisect** rather than adding more instrumentation.
+2. **Per-draw CPU cost.** `tex` (~20-33 µs) and `const` (~17-30 µs) per draw
+   across ~465 draws is ~25 ms/frame. Enable
+   `skate3_native_render_scene_perf_log` + `_perf_items` for the
+   `native-scene perf-items:` breakdown. This is the largest remaining CPU item.
+3. **Sub-native rendering below 0.66.** `skate3_native_render_scale = 0.55`
+   renders correctly but crashes every run. Since 0.66 is stable, something about
+   cheaper frames still destabilises the port even with the drain in place.
+4. **The 2D aspect correction** — see "What does not work" #3. Needs a per-draw
+   ortho-width test, and a capture of the real constants to confirm the two
+   populations first.
+5. **Remaining raw guest loads.** Only the viewport/scissor capture hooks are
    gated by `GuestReadable()`; the other structure walks in the native scene can
    still fault the same way. Mechanical to fix with the same helper.
 5. **`gen_flush_cmdlist` is generated into the channel cmdbuf and never submitted**
@@ -171,6 +178,39 @@ The port carries a lot of instrumentation, all of it writing to
 - `[isr]`, `[guestthread]`, `[spinlock]`, `[timer]`, `[io]`, `[apc]`, and `GMEM`
   guest-memory mapping in `boot.log`.
 
+## Performance settings
+
+Gameplay went from 3.85 to ~6 fps by way of three settings. The first two are
+compiled in as Switch defaults; the third is opt-in because it costs image
+quality. All live in `sdmc:/switch/skate3/settings.toml`.
+
+| setting | value | what it does |
+|---|---|---|
+| `skate3_nvk_sync_submit` | `32` | Block on the GPU every 32nd kernel submit. **This is what keeps `0xd5c` away.** |
+| `skate3_native_render_scene_ssao` | `true` | Enables the **occlusion cull** — see below. Keep it on. |
+| `skate3_native_render_scale` | `0.66` | Renders the 3D world at 43% of the pixels and upscales; the HUD stays sharp. |
+
+Two of those are counter-intuitive enough to be worth explaining, because turning
+them "off to save performance" makes things slower:
+
+- **`0xd5c` tracks whether the CPU ever *blocks*, not how often it submits.** An
+  expensive frame blocks 15-200 ms per frame in `nvFenceWait`, a cheap one 0.4 ms
+  — and a GPU that keeps up stops nvgpu retiring finished submit jobs, until the
+  per-submit allocation fails. Draining periodically restores that. Swept on
+  hardware: period 4/16/32/64 gave 4.7/5.2/**5.9**/5.0 fps, and 64 brought the
+  failures back, so 32 is both the fastest and the safe side of the edge.
+- **SSAO is a performance setting here.** The occlusion cull's depth grid is a
+  by-product of the SSAO pass's reduce, so with AO off the grid never refreshes,
+  the cull never engages, and every static item pays full per-item CPU whether or
+  not it is visible. It also gates the guest-side dispatch filter. Turning SSAO on
+  took draws/frame from 842 to 465 and per-draw cost from 91 µs to 43-69 µs, with
+  **no rise in GPU time** — the AO pass pays for itself.
+
+Measured dead, so please do not spend runs on them: submit batching (0 failures →
+8, and no main menu), draw distance / LOD at 0.6 (*worse*, and submits per frame
+rose), capping the settle pass (net zero — the work moves into the draw path and
+frame spikes get worse), and shadows / haze / shadow-atlas size (flat).
+
 ## Installing
 
 You need a modded Switch running Atmosphere (or equivalent) and homebrew access.
@@ -183,9 +223,14 @@ You need a modded Switch running Atmosphere (or equivalent) and homebrew access.
 4. Launch it from hbmenu or Sphaira. Settings are written to
    `sdmc:/switch/skate3/settings.toml`, logs to `sdmc:/switch/skate3/logs/`.
 
-It gets as far as the language select screen and then dies, so this is still only
-useful for development — but pressing HOME is safe now, so trying it will not cost
-you a hard power-off.
+It reaches gameplay and is playable at ~6 fps, but **a crash before the main menu
+kills many launches** — expect to relaunch several times. Pressing HOME is safe,
+so trying it will not cost you a hard power-off.
+
+There is no prebuilt `skate3.nro` release. The binary produced by this project
+contains the statically recompiled game executable, which is why `generated/` is
+gitignored and why no build is distributed: **build it yourself from your own
+copy of the game.** See [Building](#building).
 
 ## Controls
 
