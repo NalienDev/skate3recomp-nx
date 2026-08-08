@@ -11222,25 +11222,30 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // why gameplay looks right. The 2D stream is authored for 16:9 and is NOT
   // pre-squeezed, so the same stretch makes every UI element 1/0.75 too wide.
   //
-  // The correction is a horizontal squeeze, but it CANNOT be applied to the
-  // layer as a whole. Scaling the ortho row (as the ultrawide branch does) is a
-  // scale about clip x=0, so it fixes every element's SHAPE and simultaneously
-  // drags every element's POSITION toward screen centre -- corner HUD ends up
-  // sitting well inside the corner. The layer has to keep spanning the full
-  // width while each element individually gets narrower, and one uniform scale
-  // cannot do both.
+  // The correction is a horizontal squeeze about the LEFT EDGE of the frame,
+  // not about its centre. That pivot is the whole subtlety here.
   //
-  // What makes that separable is that the 2D stream is APT (Flash): each draw
-  // carries its OWN transform in m[4..7], applied as wp = world * p with the
-  // element's geometry in p and its placement in the translation column. Since
-  //   wp.x = dot(p, m[4]) = (m4.x*px + m4.y*py + m4.z*pz) + m4.w
-  // scaling m4.xyz while leaving m4.w is exactly
-  //   wp.x' = m4.w + s * (wp.x - m4.w)
-  // -- a squeeze about the element's own anchor. The ortho that follows is
-  // affine in wp.x, so it carries straight through to clip space: anchors stay
-  // where the 16:9 layout put them, geometry around each anchor narrows by s.
-  // Rotated elements are handled too (scaling all three of m4.xyz squeezes the
-  // element horizontally in world space regardless of its orientation).
+  // The 2D is authored in a 1280-wide APT space, and the game builds its ortho
+  // from the 960-wide buffer it is actually rendering into: clip = 2x/960 - 1.
+  // So authored x=1280 lands at clip +1.667 -- the layer overflows the frame by
+  // 4/3, which is the reported "UI is too wide". What it should be, so that the
+  // present stretch to 1280 reproduces the authored layout, is clip = 2x/1280-1.
+  // Those two are related by clip' = s*clip + (s-1) with s = out/(16:9) = 0.75,
+  // i.e. a scale about clip.x = -1. Checked at the corners and the centre:
+  //   x=0    -1.000 -> -1.000     x=640  +0.333 -> 0.000
+  //   x=1280 +1.667 -> +1.000     x=960  +1.000 -> +0.500
+  // A scale about clip 0 (just multiplying the row) instead gives -0.750 for
+  // the left edge and +0.250 for the centre: every element correctly narrowed
+  // but dragged toward the middle, which is exactly the corner-HUD-too-far-in
+  // symptom. The missing piece was never per-element anchoring, it was the
+  // pivot.
+  //
+  // Being one affine map over the whole layer, this also keeps elements that
+  // belong together in the same relative places -- a per-element squeeze does
+  // NOT: APT bakes placement into the vertices for some draws and into the
+  // world transform for others, so squeezing each draw about its own transform
+  // origin moved those two classes differently and separated things like the
+  // loading icon from its own backing plate.
   const float narrow_2d_squeeze =
       out_aspect2d < (16.0f / 9.0f) * 0.99f ? out_aspect2d / (16.0f / 9.0f) : 1.0f;
 
@@ -11573,20 +11578,20 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         const bool ortho = d.consts[12] == 0.0f && d.consts[13] == 0.0f &&
                            d.consts[14] == 0.0f && d.consts[15] == 1.0f;
         constants[36] = ortho ? 1.0f : 0.0f;
-        // Narrow output: squeeze this element about its own anchor by scaling
-        // the world row that produces wp.x (m[4] = consts[16..19]) and leaving
-        // its translation consts[19] alone. See narrow_2d_squeeze.
+        // Narrow output: squeeze the layer about its LEFT EDGE (clip.x = -1).
+        // The VS computes clip.x = dot(wp, c0), so clip' = s*clip + (s-1) is
+        // the whole ortho row scaled by s with the constant term also carrying
+        // the pivot shift. See narrow_2d_squeeze for the derivation.
         //
         // ORTHO ONLY. Perspective draws here are the in-world SimpleDraw
         // markers, which ride the guest's own view-projection -- the same
         // already-anamorphic projection the 3D scene uses, so they are correct
-        // as staged and m[4..7] is a world transform in metres, not a UI
-        // placement. Squeezing that would narrow geometry the scene projection
-        // has already accounted for.
+        // as staged and must not be touched.
         if (ortho && narrow_2d_squeeze != 1.0f) {
-          constants[16] *= narrow_2d_squeeze;
-          constants[17] *= narrow_2d_squeeze;
-          constants[18] *= narrow_2d_squeeze;
+          constants[0] *= narrow_2d_squeeze;
+          constants[1] *= narrow_2d_squeeze;
+          constants[2] *= narrow_2d_squeeze;
+          constants[3] = constants[3] * narrow_2d_squeeze + (narrow_2d_squeeze - 1.0f);
         }
         // m[9].y: sharp-magnification amount for APT cached-bitmap tiles
         // (see the cvar; the shader gates on actual fetch magnification).
