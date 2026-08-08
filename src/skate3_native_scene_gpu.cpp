@@ -2357,8 +2357,14 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
   static thread_local std::vector<uint8_t> cube_scratch;
   cube_scratch.resize(scratch_total);
   for (uint32_t m = 0; m < mip_levels; ++m) {
-    if (!GuestTryCopy(cube_scratch.data() + lv[m].scratch_off,
-                      base + (0xA0000000u | lv[m].addr), lv[m].slice_bytes * 6)) {
+    // GuestTryCopyTo, not the 3-arg GuestTryCopy: that wrapper is for the small
+    // FIXED buffers and hardcodes a 64 KiB cap, so it refused these outright
+    // (196608 and 786432 bytes were the observed refusals) and the cube then
+    // sampled never-written scratch. cube_scratch is resized to scratch_total
+    // immediately above, so state the real remaining capacity.
+    if (!GuestTryCopyTo(cube_scratch.data() + lv[m].scratch_off,
+                        cube_scratch.size() - lv[m].scratch_off,
+                        base + (0xA0000000u | lv[m].addr), lv[m].slice_bytes * 6)) {
       if (m == 0) {
         return false;
       }
@@ -5571,7 +5577,11 @@ bool WriteGrabToGuest(uint8_t* base, const uint8_t* src) {
       }
     }
   }
-  return GuestTryCopy(base + kGrabGuestView, staging.data(), staging.size());
+  // Same reason as EnsureGuestCubeTexture's scratch copy: the 3-arg wrapper caps
+  // at 64 KiB, which refused this whole-image writeback. The guest screenshot
+  // target is sized for exactly this tiled image, so the capacity IS its size.
+  return GuestTryCopyTo(base + kGrabGuestView, staging.size(), staging.data(),
+                        staging.size());
 }
 
 // The photo-grab window (see skate3_native_render_scene_photo_readback /
