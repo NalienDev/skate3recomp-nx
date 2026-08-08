@@ -379,10 +379,31 @@ void Install() {
     // hold: 4x MSAA plus HDR targets and a 12288x4096 static sun-shadow atlas
     // (~200 MB for that texture alone) on a shared 4 GB pool. Scale them down
     // before the scene allocates anything.
-    rex::cvar::SetFlagByName("skate3_native_render_scene_msaa", "1");
-    rex::cvar::SetFlagByName("skate3_native_render_scene_hdr", "false");
-    rex::cvar::SetFlagByName("skate3_native_render_scene_shadow_static_size", "1024");
-    REXLOG_INFO("native-render: Switch memory profile (MSAA x1, no HDR, 1024 static shadow)");
+    //
+    // ONLY where the user has not set the cvar themselves. These three used to
+    // be unconditional SetFlagByName calls, which silently overwrote whatever
+    // settings.toml had said: a run configured with shadow_static_size = 512
+    // ran at 1024 regardless. Guarding on HasNonDefaultValue is right whichever
+    // order the two land in -- before the file is parsed nothing is non-default
+    // so the Switch profile applies, and after it the user's value wins.
+    const auto switch_default = [](const char* name, const char* value) {
+      if (!rex::cvar::HasNonDefaultValue(name)) {
+        rex::cvar::SetFlagByName(name, value);
+      }
+    };
+    switch_default("skate3_native_render_scene_msaa", "1");
+    switch_default("skate3_native_render_scene_hdr", "false");
+    switch_default("skate3_native_render_scene_shadow_static_size", "1024");
+    // Report what is ACTUALLY in force, not what this wanted to set. The old
+    // line printed the requested values as though they were the outcome, which
+    // is precisely what hid the clobbering for so long -- it agreed with itself
+    // whether or not the assignment had done anything. Query<T> rather than
+    // REXCVAR_GET: these cvars are defined in skate3_native_scene.cpp.
+    REXLOG_INFO(
+        "native-render: Switch memory profile (MSAA x{}, {}, {} static shadow)",
+        rex::cvar::Query<int32_t>("skate3_native_render_scene_msaa"),
+        rex::cvar::Query<bool>("skate3_native_render_scene_hdr") ? "HDR" : "no HDR",
+        rex::cvar::Query<int32_t>("skate3_native_render_scene_shadow_static_size"));
 #endif
   }
   skate3::native_scene::Install();
