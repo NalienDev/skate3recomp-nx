@@ -59,6 +59,14 @@
 #include "skate3_native_scene_state.h"
 #include "skate3_native_scene_gpu_internal.h"
 
+#if REX_PLATFORM_SWITCH
+// How many GPU EXECs the NVK winsys shim coalesces into one kernel submit
+// (drm_shim.c, channel_flush_locked). Driven from skate3_nvk_submit_batch below.
+// extern "C" at file scope: a block-scope extern inside a namespace would
+// declare a C++-mangled symbol that does not exist in libvulkan.a.
+extern "C" int g_drm_shim_batch_max;
+#endif
+
 // Cvars defined in skate3_native_scene.cpp (and SDK cvars re-declared there).
 REXCVAR_DECLARE(bool, async_shader_compilation);
 REXCVAR_DECLARE(bool, native_render_suppress_emulated_draws);
@@ -125,6 +133,7 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_mips);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_revalidate);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_transparents);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_world_v2);
+REXCVAR_DECLARE(int32_t, skate3_nvk_submit_batch);
 REXCVAR_DECLARE(double, skate3_menu_blur_sigma);
 REXCVAR_DECLARE(double, skate3_native_render_scene_2d_sharp);
 REXCVAR_DECLARE(double, skate3_native_render_scene_bloom_intensity);
@@ -7575,6 +7584,15 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     static uint64_t s_maxq_cycle_frame = 0;
     skate3::MaxQualityAutoCycle(++s_maxq_cycle_frame);
   }
+#if REX_PLATFORM_SWITCH
+  // Push the NVK submit-batch depth. Done per frame, not once at startup: the
+  // Switch graphics defaults are installed BEFORE settings.toml is parsed, so a
+  // one-shot apply would read the compiled default and silently ignore the file.
+  // Per frame also makes it hot-reloadable, which is the point -- this is the
+  // A/B control for submit batching and the alternative to exercising it is a
+  // full NVK archive rebuild per data point.
+  g_drm_shim_batch_max = std::clamp(REXCVAR_GET(skate3_nvk_submit_batch), 1, 32);
+#endif
   // While the game reports menus / loading (presence context 0x8001 == 0),
   // yield to the emulated output, EXCEPT the in-game pause menu (world
   // still publishing perspective scenes), which stays native when
@@ -11009,6 +11027,34 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   const float wide_2d_scale =
       out_aspect2d > (16.0f / 9.0f) * 1.01f ? (16.0f / 9.0f) / out_aspect2d : 1.0f;
 
+  // NARROW output (the Switch case): the guest hands us a 960x720 frontbuffer,
+  // which is ANAMORPHIC -- the guest pre-squeezes a 16:9 scene into 4:3 pixels
+  // and the present stretch back out to the 16:9 display restores it. That is
+  // why gameplay looks right. The 2D stream is authored for 16:9 and is NOT
+  // pre-squeezed, so the same stretch makes every UI element 1/0.75 too wide.
+  //
+  // The correction is a horizontal squeeze, but it CANNOT be applied to the
+  // layer as a whole. Scaling the ortho row (as the ultrawide branch does) is a
+  // scale about clip x=0, so it fixes every element's SHAPE and simultaneously
+  // drags every element's POSITION toward screen centre -- corner HUD ends up
+  // sitting well inside the corner. The layer has to keep spanning the full
+  // width while each element individually gets narrower, and one uniform scale
+  // cannot do both.
+  //
+  // What makes that separable is that the 2D stream is APT (Flash): each draw
+  // carries its OWN transform in m[4..7], applied as wp = world * p with the
+  // element's geometry in p and its placement in the translation column. Since
+  //   wp.x = dot(p, m[4]) = (m4.x*px + m4.y*py + m4.z*pz) + m4.w
+  // scaling m4.xyz while leaving m4.w is exactly
+  //   wp.x' = m4.w + s * (wp.x - m4.w)
+  // -- a squeeze about the element's own anchor. The ortho that follows is
+  // affine in wp.x, so it carries straight through to clip space: anchors stay
+  // where the 16:9 layout put them, geometry around each anchor narrows by s.
+  // Rotated elements are handled too (scaling all three of m4.xyz squeezes the
+  // element horizontally in world space regardless of its orientation).
+  const float narrow_2d_squeeze =
+      out_aspect2d < (16.0f / 9.0f) * 0.99f ? out_aspect2d / (16.0f / 9.0f) : 1.0f;
+
   cmd->ProfileRegion(nrhi::ProfileStage::k2d);
 
   // ---- Native photo grab (photo_grab_native) ----
@@ -11338,6 +11384,21 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         const bool ortho = d.consts[12] == 0.0f && d.consts[13] == 0.0f &&
                            d.consts[14] == 0.0f && d.consts[15] == 1.0f;
         constants[36] = ortho ? 1.0f : 0.0f;
+        // Narrow output: squeeze this element about its own anchor by scaling
+        // the world row that produces wp.x (m[4] = consts[16..19]) and leaving
+        // its translation consts[19] alone. See narrow_2d_squeeze.
+        //
+        // ORTHO ONLY. Perspective draws here are the in-world SimpleDraw
+        // markers, which ride the guest's own view-projection -- the same
+        // already-anamorphic projection the 3D scene uses, so they are correct
+        // as staged and m[4..7] is a world transform in metres, not a UI
+        // placement. Squeezing that would narrow geometry the scene projection
+        // has already accounted for.
+        if (ortho && narrow_2d_squeeze != 1.0f) {
+          constants[16] *= narrow_2d_squeeze;
+          constants[17] *= narrow_2d_squeeze;
+          constants[18] *= narrow_2d_squeeze;
+        }
         // m[9].y: sharp-magnification amount for APT cached-bitmap tiles
         // (see the cvar; the shader gates on actual fetch magnification).
         constants[37] = float(std::clamp(

@@ -908,6 +908,18 @@ REXCVAR_DEFINE_INT32(
     "from async eligibility entirely.")
     .range(0, 1 << 24)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(skate3_nvk_submit_batch, 8, "Skate 3",
+                     "Switch/NVK only: how many GPU EXECs the winsys shim coalesces "
+                     "into one kernel submit (nvGpuChannelKickoff). 1 reproduces the "
+                     "old one-submit-per-EXEC behaviour exactly. The kernel error "
+                     "0xd5c tracks how OFTEN we submit rather than how much work or "
+                     "memory is involved -- making frames cheaper made it MORE "
+                     "frequent -- so this is the knob that decides stability under "
+                     "load, and it is exposed here so it can be A/B'd on device "
+                     "without rebuilding the NVK archive. Applied per frame by the "
+                     "native scene renderer.")
+    .range(1, 32)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_DOUBLE(skate3_native_render_scene_2d_sharp, 0.0, "Skate 3",
                       "Sharp-magnification amount for the 2D/HUD overlay (0 = plain "
                       "bilinear, up to 2). Much of the APT (Flash) HUD samples "
